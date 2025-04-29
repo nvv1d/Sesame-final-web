@@ -22,6 +22,12 @@ document.addEventListener('DOMContentLoaded', function() {
     let audioProcessor = null;
     let audioAnalyser = null;
     let audioVisualizerInstance = null;
+    
+    // Audio context initialization options
+    const audioContextOptions = {
+        latencyHint: 'interactive',
+        sampleRate: 48000 // Use high sample rate for better quality
+    };
 
     // Voice activity detection settings
     const amplitudeThreshold = 0.01;
@@ -162,8 +168,13 @@ document.addEventListener('DOMContentLoaded', function() {
             // Create a new session
             await createSession(character);
 
-            // Initialize audio context
-            audioContext = new AudioContext({ sampleRate: sampleRate });
+            // Initialize audio context with optimized settings
+            audioContext = new AudioContext(audioContextOptions);
+            
+            // Resume audio context (needed for some browsers that suspend by default)
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
+            }
 
             // Set up microphone access
             await setupMicrophone();
@@ -301,13 +312,22 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
+    // WebSocket connection variables
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 5;
+    const reconnectDelay = 2000; // 2 seconds base delay
+    let reconnectTimeout = null;
+    
     /**
-     * Connect to the WebSocket
+     * Connect to the WebSocket with reconnection logic
      */
     function connectWebSocket() {
         if (!sessionId) {
             throw new Error('No session ID available');
         }
+
+        // Clear any existing reconnect timeout
+        clearTimeout(reconnectTimeout);
 
         // Create WebSocket URL
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -322,7 +342,48 @@ document.addEventListener('DOMContentLoaded', function() {
         socket.onerror = handleSocketError;
         socket.onmessage = handleSocketMessage;
 
+        // Set a timeout for the connection
+        const connectionTimeout = setTimeout(() => {
+            if (socket && socket.readyState !== WebSocket.OPEN) {
+                socket.close();
+                handleReconnect(new Error('Connection timeout'));
+            }
+        }, 10000); // 10 second timeout
+
+        // Clear the timeout when connected
+        socket.addEventListener('open', () => {
+            clearTimeout(connectionTimeout);
+        });
+
         logStatus('Connecting to server...');
+    }
+    
+    /**
+     * Handle reconnection logic
+     */
+    function handleReconnect(error) {
+        if (!isRunning) return; // Don't reconnect if we're not supposed to be running
+        
+        logStatus(`Connection issue: ${error.message}. Reconnecting...`);
+        updateStatus('Reconnecting...');
+        updateConnectionStatus('Reconnecting...');
+        
+        // Implement exponential backoff
+        if (reconnectAttempts < maxReconnectAttempts) {
+            const delay = reconnectDelay * Math.pow(1.5, reconnectAttempts);
+            reconnectAttempts++;
+            
+            logStatus(`Reconnect attempt ${reconnectAttempts}/${maxReconnectAttempts} in ${Math.floor(delay/1000)} seconds`);
+            
+            reconnectTimeout = setTimeout(() => {
+                if (isRunning) {
+                    connectWebSocket();
+                }
+            }, delay);
+        } else {
+            logStatus('Failed to reconnect after multiple attempts');
+            stopVoiceChat();
+        }
     }
 
     /**
@@ -343,11 +404,18 @@ document.addEventListener('DOMContentLoaded', function() {
     function handleSocketClose(event) {
         console.log('WebSocket closed:', event);
         isConnected = false;
-        logStatus(`WebSocket closed: ${event.reason || 'Connection closed'}`);
-
-        // Stop the voice chat if it's still running
-        if (isRunning) {
-            stopVoiceChat();
+        
+        if (event.code === 1000) {
+            // Normal closure
+            logStatus(`WebSocket closed: ${event.reason || 'Connection closed normally'}`);
+            
+            // Stop the voice chat if it's still running
+            if (isRunning) {
+                stopVoiceChat();
+            }
+        } else {
+            // Abnormal closure, attempt to reconnect
+            handleReconnect(new Error(`Connection closed: ${event.code}`));
         }
     }
 
@@ -374,6 +442,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     break;
 
                 case 'audio':
+                    // Process using our enhanced audio handling
                     processAudioMessage(message);
                     break;
 
@@ -382,7 +451,8 @@ document.addEventListener('DOMContentLoaded', function() {
                     break;
 
                 case 'pong':
-                    // Ping response, nothing to do
+                    // Update connection metrics
+                    updateConnectionMetrics();
                     break;
 
                 default:
@@ -391,6 +461,43 @@ document.addEventListener('DOMContentLoaded', function() {
 
         } catch (error) {
             console.error('Error processing message:', error);
+        }
+    }
+    
+    // Connection metrics
+    let pingStartTime = 0;
+    let currentLatency = 0;
+    let latencyHistory = [];
+    
+    /**
+     * Send ping to measure connection quality
+     */
+    function sendPing() {
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            pingStartTime = Date.now();
+            socket.send(JSON.stringify({ type: 'ping' }));
+        }
+    }
+    
+    /**
+     * Update connection metrics based on ping-pong
+     */
+    function updateConnectionMetrics() {
+        if (pingStartTime > 0) {
+            // Calculate round-trip time
+            const rtt = Date.now() - pingStartTime;
+            currentLatency = rtt;
+            
+            // Record for trend analysis
+            latencyHistory.push(rtt);
+            if (latencyHistory.length > 20) {
+                latencyHistory.shift();
+            }
+            
+            // Log high latency as it may affect audio quality
+            if (rtt > 500) {
+                logStatus(`High network latency: ${rtt}ms`);
+            }
         }
     }
 
@@ -437,30 +544,158 @@ document.addEventListener('DOMContentLoaded', function() {
         return bytes.buffer;
     }
 
+    // Audio buffer for smoother playback
+    const audioBufferQueue = [];
+    let isAudioPlaying = false;
+    let audioScheduledEndTime = 0;
+    
+    // Jitter buffer settings
+    let jitterBufferSize = 120; // milliseconds
+    let jitterBufferAdjustTime = 0;
+    let networkJitter = [];
+    
     /**
-     * Play audio data
+     * Process and queue audio for smoother playback
      */
-    function playAudio(audioData, sampleRate, preserveQuality = true) {
-        if (!audioContext) return;
+    function processAudioMessage(message) {
+        try {
+            // Decode base64 audio data
+            const audioData = message.data;
+            const sampleRate = message.sampleRate || 24000;
+            
+            // Queue the audio for smoother playback
+            queueAudio(audioData, sampleRate, message.timestamp);
+            
+            // Process network stats
+            if (message.timestamp) {
+                const now = Date.now() / 1000;
+                const serverTime = message.timestamp;
+                const latency = now - serverTime;
+                
+                // Record jitter for adaptive buffer sizing
+                networkJitter.push(latency);
+                if (networkJitter.length > 20) {
+                    networkJitter.shift();
+                }
+                
+                // Adjust jitter buffer every 2 seconds
+                if (now - jitterBufferAdjustTime > 2) {
+                    adjustJitterBuffer();
+                    jitterBufferAdjustTime = now;
+                }
+            }
+        } catch (error) {
+            console.error('Error processing audio message:', error);
+        }
+    }
+    
+    /**
+     * Adjust jitter buffer size based on network conditions
+     */
+    function adjustJitterBuffer() {
+        if (networkJitter.length < 5) return;
+        
+        // Calculate average and variance of jitter
+        const sum = networkJitter.reduce((a, b) => a + b, 0);
+        const avg = sum / networkJitter.length;
+        
+        const variance = networkJitter.reduce((a, b) => a + Math.pow(b - avg, 2), 0) / networkJitter.length;
+        const stdDev = Math.sqrt(variance);
+        
+        // Adjust buffer based on jitter
+        if (stdDev > 0.05) {
+            // High jitter - increase buffer
+            jitterBufferSize = Math.min(300, jitterBufferSize + 20);
+            console.log(`High jitter (${stdDev.toFixed(3)}s), increased buffer to ${jitterBufferSize}ms`);
+        } else if (stdDev < 0.02 && jitterBufferSize > 100) {
+            // Low jitter - decrease buffer
+            jitterBufferSize = Math.max(80, jitterBufferSize - 10);
+            console.log(`Low jitter (${stdDev.toFixed(3)}s), decreased buffer to ${jitterBufferSize}ms`);
+        }
+    }
+    
+    /**
+     * Queue audio for playback
+     */
+    function queueAudio(audioData, sampleRate, timestamp) {
+        // Add to buffer queue
+        audioBufferQueue.push({
+            data: audioData,
+            sampleRate: sampleRate,
+            timestamp: timestamp || Date.now() / 1000
+        });
+        
+        // Start playing if not already
+        if (!isAudioPlaying) {
+            processAudioQueue();
+        }
+    }
+    
+    /**
+     * Process audio queue for smooth playback
+     */
+    function processAudioQueue() {
+        if (audioBufferQueue.length === 0) {
+            isAudioPlaying = false;
+            return;
+        }
+        
+        isAudioPlaying = true;
+        
+        // Calculate total buffered audio duration
+        let totalBufferedMs = 0;
+        for (const item of audioBufferQueue) {
+            const buffer = base64ToArrayBuffer(item.data);
+            // 16-bit audio = 2 bytes per sample
+            const samples = buffer.byteLength / 2;
+            const durationMs = (samples / item.sampleRate) * 1000;
+            totalBufferedMs += durationMs;
+        }
+        
+        // Check if we have enough buffered audio
+        if (totalBufferedMs < jitterBufferSize && audioBufferQueue.length < 5) {
+            // Not enough buffered yet, check again soon
+            setTimeout(processAudioQueue, 20);
+            return;
+        }
+        
+        // Get and remove the oldest audio chunk
+        const nextAudio = audioBufferQueue.shift();
+        
+        // Play this audio chunk
+        const source = playAudio(nextAudio.data, nextAudio.sampleRate);
+        
+        // Schedule next chunk processing
+        if (source) {
+            source.onended = processAudioQueue;
+        } else {
+            // If playback failed, try next chunk
+            setTimeout(processAudioQueue, 10);
+        }
+    }
+    
+    /**
+     * Play audio data with enhanced quality
+     */
+    function playAudio(audioData, sampleRate) {
+        if (!audioContext) return null;
 
         try {
             // Decode base64 audio data
             const byteArray = base64ToArrayBuffer(audioData);
             
-            // Convert byteArray to Int16Array (16-bit PCM format that Sesame AI uses)
+            // Convert byteArray to Int16Array (16-bit PCM format)
             const int16Data = new Int16Array(byteArray);
             
-            // Create an audio buffer with higher sample rate for better quality
+            // Create an audio buffer with appropriate sample rate
             const frameCount = int16Data.length;
-            // Use a higher sample rate when available
             const effectiveSampleRate = sampleRate || 24000;
             const audioBuffer = audioContext.createBuffer(1, frameCount, effectiveSampleRate);
             
-            // Get the raw audio data and convert from Int16 to Float32 format with enhanced precision
+            // Get the raw audio data and convert from Int16 to Float32 format
             const channelData = audioBuffer.getChannelData(0);
             for (let i = 0; i < frameCount; i++) {
                 // Convert from Int16 (-32768 to 32767) to Float32 (-1.0 to 1.0)
-                // Add slight emphasis on mid-range frequencies where voice intelligibility is critical
                 channelData[i] = (int16Data[i] / 32768.0);
             }
             
@@ -468,53 +703,55 @@ document.addEventListener('DOMContentLoaded', function() {
             const source = audioContext.createBufferSource();
             source.buffer = audioBuffer;
             
-            // Create higher quality audio pipeline
-            let outputNode = source;
+            // Create optimized audio pipeline for voice
+            // 1. High-pass filter to remove low rumble
+            const highPass = audioContext.createBiquadFilter();
+            highPass.type = "highpass";
+            highPass.frequency.value = 80;   // Cut below 80Hz
             
-            if (preserveQuality) {
-                // Add a high-quality context with enhanced voice settings
-                const compressor = audioContext.createDynamicsCompressor();
-                compressor.threshold.value = -50;
-                compressor.knee.value = 40;
-                // Dynamic compression settings optimized for voice
-                compressor.threshold.value = -20;  // Slightly higher threshold for less compression
-                compressor.knee.value = 25;        // Smoother compression curve
-                compressor.ratio.value = 4;        // Gentler ratio for more natural sound
-                compressor.attack.value = 0.005;   // Slightly slower attack
-                compressor.release.value = 0.25;   // Moderate release for natural decay
-                
-                // Create a biquad filter for voice enhancement
-                const voiceEQ = audioContext.createBiquadFilter();
-                voiceEQ.type = "peaking";        // EQ bell curve
-                voiceEQ.frequency.value = 2500;  // Enhance speech intelligibility range
-                voiceEQ.Q.value = 1.2;           // Slightly narrower width
-                voiceEQ.gain.value = 3;          // +3dB boost to this frequency range
-                
-                // Create a high-pass filter to remove rumble
-                const highPass = audioContext.createBiquadFilter();
-                highPass.type = "highpass";
-                highPass.frequency.value = 80;   // Cut below 80Hz
-                
-                // Create a gain node to adjust the signal volume
-                const gainNode = audioContext.createGain();
-                gainNode.gain.value = 0.8;       // Lower volume to 80% of original
-                
-                // Connect through our enhanced pipeline
-                source.connect(highPass);
-                highPass.connect(voiceEQ);
-                voiceEQ.connect(compressor);
-                compressor.connect(gainNode);
-                outputNode = gainNode;
-            }
+            // 2. Voice EQ for clarity
+            const voiceEQ = audioContext.createBiquadFilter();
+            voiceEQ.type = "peaking";        // EQ bell curve
+            voiceEQ.frequency.value = 2100;  // Enhance speech intelligibility range
+            voiceEQ.Q.value = 1.4;           // Moderate Q
+            voiceEQ.gain.value = 4;          // +4dB boost
             
-            // Connect to destination
-            outputNode.connect(audioContext.destination);
+            // 3. Light compressor for consistent level
+            const compressor = audioContext.createDynamicsCompressor();
+            compressor.threshold.value = -18;
+            compressor.knee.value = 10;
+            compressor.ratio.value = 3;
+            compressor.attack.value = 0.003;
+            compressor.release.value = 0.25;
             
-            // Start playing
-            source.start(0);
+            // 4. Output gain control
+            const gainNode = audioContext.createGain();
+            gainNode.gain.value = 0.9;
+            
+            // Connect the pipeline
+            source.connect(highPass);
+            highPass.connect(voiceEQ);
+            voiceEQ.connect(compressor);
+            compressor.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+            
+            // Get current time
+            const now = audioContext.currentTime;
+            
+            // Schedule with precise timing
+            // Start either right now or after the last scheduled audio ends
+            const startTime = Math.max(now, audioScheduledEndTime);
+            source.start(startTime);
+            
+            // Update scheduled end time for next chunk
+            audioScheduledEndTime = startTime + audioBuffer.duration;
+            
+            // Return the source for event handling
+            return source;
             
         } catch (error) {
             console.error('Error playing audio:', error);
+            return null;
         }
     }
 
@@ -649,7 +886,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     /**
-     * Start sending ping messages
+     * Start sending ping messages to monitor connection
      */
     let pingInterval = null;
     function startPingInterval() {
@@ -658,12 +895,12 @@ document.addEventListener('DOMContentLoaded', function() {
             clearInterval(pingInterval);
         }
 
-        // Send ping every 30 seconds
+        // Send ping more frequently (every 5 seconds) to better monitor connection
         pingInterval = setInterval(() => {
             if (socket && socket.readyState === WebSocket.OPEN) {
-                socket.send(JSON.stringify({ type: 'ping' }));
+                sendPing();
             }
-        }, 30000);
+        }, 5000);
     }
 
     /**
