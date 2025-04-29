@@ -158,42 +158,140 @@ class VoiceChatProxy:
         logger.debug("Audio processing thread started")
 
     def process_ai_audio(self):
-        """Process audio received from Sesame AI and forward to browser with enhanced quality"""
-        logger.debug("High-quality audio processing started")
-
+        """Process audio received from Sesame AI with buffering and quality enhancement"""
+        logger.debug("Enhanced audio processing started")
+        
+        # Audio buffer for smoother playback
+        audio_buffer = []
+        buffer_size_ms = 120  # Buffer size in milliseconds
+        last_send_time = 0
+        
+        # Stats for adaptive buffering
+        network_jitter = []
+        last_chunk_time = 0
+        
         while self.running:
             try:
                 # Get audio chunk from WebSocket buffer with a short timeout
                 if self.ws:
-                    audio_chunk = self.ws.get_next_audio_chunk(timeout=0.1)
-                    if audio_chunk and self.browser_ws and self.client_connected:
-                        # Convert to base64 for sending to browser - preserve full quality
-                        audio_base64 = base64.b64encode(audio_chunk).decode('utf-8')
-
-                        # Apply optional audio enhancement before sending
-                        # Just pass through as is, client will handle enhanced processing
-
-                        # Create message with audio data and ensure high sample rate
-                        message = {
-                            'type': 'audio',
-                            'data': audio_base64,
-                            'sampleRate': self.server_sample_rate,
-                            'preserveQuality': True,
-                            'format': 'int16',
-                            'channels': 1,
-                            'bitDepth': 16
-                        }
-
-                        # Send to browser
-                        try:
-                            self.browser_ws.send(json.dumps(message))
-                        except Exception as e:
-                            logger.error(f"Error sending audio to browser: {e}")
+                    audio_chunk = self.ws.get_next_audio_chunk(timeout=0.05)
+                    
+                    if audio_chunk:
+                        # Track network stats
+                        now = time.time()
+                        if last_chunk_time > 0:
+                            gap = now - last_chunk_time
+                            network_jitter.append(gap)
+                            # Keep only last 20 measurements
+                            if len(network_jitter) > 20:
+                                network_jitter.pop(0)
+                        last_chunk_time = now
+                        
+                        # Add to buffer
+                        audio_buffer.append(audio_chunk)
+                        
+                        # Calculate buffer duration
+                        total_bytes = sum(len(chunk) for chunk in audio_buffer)
+                        # Each sample is 2 bytes (16-bit)
+                        total_samples = total_bytes // 2
+                        buffer_duration_ms = (total_samples / self.server_sample_rate) * 1000
+                        
+                        # Adaptive buffer sizing based on network conditions
+                        if len(network_jitter) >= 5:
+                            avg_jitter = sum(network_jitter) / len(network_jitter)
+                            jitter_ms = avg_jitter * 1000
+                            
+                            # Adjust buffer size based on network jitter
+                            if jitter_ms > 50:  # High jitter
+                                buffer_size_ms = min(300, buffer_size_ms + 20)
+                            elif jitter_ms < 20 and buffer_size_ms > 100:  # Low jitter
+                                buffer_size_ms = max(80, buffer_size_ms - 10)
+                        
+                        # Send buffered audio if buffer is full or enough time has passed
+                        if (buffer_duration_ms >= buffer_size_ms or 
+                            (now - last_send_time > 0.2 and len(audio_buffer) > 0)):
+                            
+                            # Combine all chunks
+                            combined_audio = b''.join(audio_buffer)
+                            
+                            # Enhance audio quality
+                            enhanced_audio = self.enhance_audio_quality(combined_audio)
+                            
+                            # Send to browser
+                            if self.browser_ws and self.client_connected:
+                                self.send_audio_to_browser(enhanced_audio)
+                                
+                            # Reset buffer
+                            audio_buffer = []
+                            last_send_time = now
                 else:
                     time.sleep(0.1)
             except Exception as e:
                 if self.running:
                     logger.error(f"Error processing audio: {e}", exc_info=True)
+                    time.sleep(0.1)
+    
+    def enhance_audio_quality(self, audio_chunk):
+        """Enhance audio quality for better intelligibility"""
+        try:
+            # If audio enhancement libraries not available, just return the original
+            try:
+                import numpy as np
+            except ImportError:
+                return audio_chunk
+                
+            # Convert bytes to numpy array (16-bit PCM)
+            audio_array = np.frombuffer(audio_chunk, dtype=np.int16)
+            
+            if len(audio_array) > 0:
+                # Normalize audio (increase volume without clipping)
+                max_val = np.max(np.abs(audio_array))
+                if max_val > 0:
+                    scale = min(32767 / max_val * 0.9, 2.0)  # Scale up to 90% of max
+                    audio_array = np.clip(audio_array * scale, -32768, 32767).astype(np.int16)
+                
+                # Simple, fast DC offset removal
+                audio_array = audio_array - np.mean(audio_array)
+                
+                # Optional: Apply simple filtering to enhance voice frequencies
+                # This is a simple approach that doesn't require scipy
+                if len(audio_array) > 64:
+                    # Simple high-pass filter (average subtraction)
+                    window_size = 16
+                    avg = np.convolve(audio_array, np.ones(window_size)/window_size, mode='same')
+                    audio_array = audio_array - avg.astype(np.int16)
+            
+            # Convert back to bytes
+            return audio_array.tobytes()
+        except Exception as e:
+            logger.warning(f"Audio enhancement failed, using original: {e}")
+            return audio_chunk
+    
+    def send_audio_to_browser(self, audio_chunk):
+        """Send audio chunk to browser with metadata"""
+        if not self.browser_ws or not self.client_connected:
+            return
+            
+        try:
+            # Convert to base64 for sending to browser
+            audio_base64 = base64.b64encode(audio_chunk).decode('utf-8')
+            
+            # Create message with audio data and metadata
+            message = {
+                'type': 'audio',
+                'data': audio_base64,
+                'sampleRate': self.server_sample_rate,
+                'timestamp': time.time(),
+                'preserveQuality': True,
+                'format': 'int16',
+                'channels': 1,
+                'bitDepth': 16
+            }
+            
+            # Send to browser
+            self.browser_ws.send(json.dumps(message))
+        except Exception as e:
+            logger.error(f"Error sending audio to browser: {e}")
 
     def send_audio_to_ai(self, audio_data_base64):
         """Send audio data from browser to Sesame AI"""
