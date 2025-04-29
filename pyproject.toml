@@ -20,6 +20,6 @@ dependencies = [
 name = "sesame-ai-voice-chat"
 version = "0.1.0"
 description = "Web-based voice chat application using Sesame AI platform"
-authors = ["Your Name <your.email@example.com>"]
+authors = ["nvv1d blxxdrxvxn@navit.cloudns.ph"]
 readme = "README.md"
 package-mode = false
