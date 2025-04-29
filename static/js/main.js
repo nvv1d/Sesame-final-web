@@ -675,7 +675,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     
     /**
-     * Play audio data with enhanced quality
+     * Play audio data with simplified processing to fix static issues
      */
     function playAudio(audioData, sampleRate) {
         if (!audioContext) return null;
@@ -693,53 +693,38 @@ document.addEventListener('DOMContentLoaded', function() {
             const audioBuffer = audioContext.createBuffer(1, frameCount, effectiveSampleRate);
             
             // Get the raw audio data and convert from Int16 to Float32 format
+            // CRITICAL: Apply a volume reduction to avoid feedback/clipping
+            const volumeReduction = 0.5; // Reduce volume by half
             const channelData = audioBuffer.getChannelData(0);
             for (let i = 0; i < frameCount; i++) {
                 // Convert from Int16 (-32768 to 32767) to Float32 (-1.0 to 1.0)
-                channelData[i] = (int16Data[i] / 32768.0);
+                // Apply volume reduction to prevent feedback
+                channelData[i] = (int16Data[i] / 32768.0) * volumeReduction;
             }
             
             // Create audio source
             const source = audioContext.createBufferSource();
             source.buffer = audioBuffer;
             
-            // Create optimized audio pipeline for voice
-            // 1. High-pass filter to remove low rumble
+            // Create simplified audio pipeline
+            // 1. Simple high-pass filter to remove low rumble
             const highPass = audioContext.createBiquadFilter();
             highPass.type = "highpass";
             highPass.frequency.value = 80;   // Cut below 80Hz
             
-            // 2. Voice EQ for clarity
-            const voiceEQ = audioContext.createBiquadFilter();
-            voiceEQ.type = "peaking";        // EQ bell curve
-            voiceEQ.frequency.value = 2100;  // Enhance speech intelligibility range
-            voiceEQ.Q.value = 1.4;           // Moderate Q
-            voiceEQ.gain.value = 4;          // +4dB boost
-            
-            // 3. Light compressor for consistent level
-            const compressor = audioContext.createDynamicsCompressor();
-            compressor.threshold.value = -18;
-            compressor.knee.value = 10;
-            compressor.ratio.value = 3;
-            compressor.attack.value = 0.003;
-            compressor.release.value = 0.25;
-            
-            // 4. Output gain control
+            // 2. Output gain control - keep volume low
             const gainNode = audioContext.createGain();
-            gainNode.gain.value = 0.9;
+            gainNode.gain.value = 0.5;
             
-            // Connect the pipeline
+            // Connect the simplified pipeline
             source.connect(highPass);
-            highPass.connect(voiceEQ);
-            voiceEQ.connect(compressor);
-            compressor.connect(gainNode);
+            highPass.connect(gainNode);
             gainNode.connect(audioContext.destination);
             
             // Get current time
             const now = audioContext.currentTime;
             
             // Schedule with precise timing
-            // Start either right now or after the last scheduled audio ends
             const startTime = Math.max(now, audioScheduledEndTime);
             source.start(startTime);
             
@@ -835,8 +820,19 @@ document.addEventListener('DOMContentLoaded', function() {
 
             // Send audio data if we have voice or periodically during silence
             if (silenceCounter < silenceLimit || silenceCounter % 10 === 0) {
-                // Convert to 16-bit PCM
-                const pcmData = floatTo16BitPCM(inputData);
+                // Apply a gentle low-pass filter to reduce high-frequency noise
+                const filteredData = new Float32Array(inputData.length);
+                let prevSample = 0;
+                const filterStrength = 0.2; // Filter strength (0-1)
+                
+                for (let i = 0; i < inputData.length; i++) {
+                    // Simple first-order low-pass filter
+                    filteredData[i] = prevSample + filterStrength * (inputData[i] - prevSample);
+                    prevSample = filteredData[i];
+                }
+                
+                // Convert to 16-bit PCM with clamping to prevent clipping
+                const pcmData = floatTo16BitPCM(filteredData);
 
                 // Send to server as base64
                 const base64Data = arrayBufferToBase64(pcmData.buffer);
@@ -857,9 +853,24 @@ document.addEventListener('DOMContentLoaded', function() {
     function floatTo16BitPCM(float32Array) {
         const int16Array = new Int16Array(float32Array.length);
         for (let i = 0; i < float32Array.length; i++) {
-            // Convert Float32 (-1.0...1.0) to Int16 (-32768...32767)
-            const s = Math.max(-1, Math.min(1, float32Array[i]));
-            int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            // Apply soft clipping to prevent harsh distortion
+            let sample = float32Array[i];
+            
+            // Soft clipping function
+            if (sample > 0.8) {
+                sample = 0.8 + (sample - 0.8) / (1 + Math.pow((sample - 0.8) * 5, 2));
+            } else if (sample < -0.8) {
+                sample = -0.8 - (Math.abs(sample) - 0.8) / (1 + Math.pow((Math.abs(sample) - 0.8) * 5, 2));
+            }
+            
+            // Hard limit to ensure we're in -1.0 to 1.0 range
+            sample = Math.max(-1, Math.min(1, sample));
+            
+            // Apply a small gain reduction to prevent clipping
+            sample *= 0.9;
+            
+            // Convert to Int16 with symmetric mapping for negative and positive values
+            int16Array[i] = Math.round(sample * 32767);
         }
         return int16Array;
     }
