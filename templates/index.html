@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sesame AI Voice Chat</title>
+    <link rel="icon" href="{{ url_for('static', filename='images/favicon.svg') }}" type="image/svg+xml">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/feather-icons/dist/feather.min.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Sesame AI Voice Chat</h1>
+            <div class="connection-status">
+                <span id="status-indicator"></span>
+                <span id="status-text">Disconnected</span>
+            </div>
+        </header>
+        
+        <div class="main-content">
+            <div class="setup-panel">
+                <h2>Setup</h2>
+                
+                <div class="form-group">
+                    <label for="character-select">Character</label>
+                    <select id="character-select">
+                        <option value="Miles">Miles</option>
+                        <option value="Maya">Maya</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="input-device">Microphone</label>
+                    <select id="input-device">
+                        <option value="" disabled selected>Loading devices...</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label for="output-device">Speaker</label>
+                    <select id="output-device">
+                        <option value="" disabled selected>Loading devices...</option>
+                    </select>
+                </div>
+                
+                <div class="control-buttons">
+                    <button id="start-button" class="button primary">
+                        <i data-feather="mic"></i> Start Chat
+                    </button>
+                    <button id="stop-button" class="button secondary" disabled>
+                        <i data-feather="mic-off"></i> Stop Chat
+                    </button>
+                </div>
+            </div>
+            
+            <div class="visualization-panel">
+                <div class="character-display">
+                    <div class="character-avatar">
+                        <svg id="character-icon" viewBox="0 0 24 24" width="120" height="120">
+                            <circle cx="12" cy="12" r="10" class="avatar-circle" />
+                            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-2-8c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zm-2-6h8v2H8zm0 10h8v2H8z" class="avatar-face" />
+                        </svg>
+                        <div id="character-name">Miles</div>
+                    </div>
+                </div>
+                
+                <div class="audio-visualization">
+                    <h3>Audio Activity</h3>
+                    <div class="visualization-container">
+                        <canvas id="audio-visualizer"></canvas>
+                    </div>
+                </div>
+                
+                <div class="status-messages">
+                    <h3>Status</h3>
+                    <div id="status-messages-container"></div>
+                </div>
+            </div>
+        </div>
+        
+        <footer>
+            <p>Sesame AI Voice Chat | <span id="connection-status">Disconnected</span></p>
+        </footer>
+    </div>
+    
+    <script src="{{ url_for('static', filename='js/audio-visualizer.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <script src="https://cdn.jsdelivr.net/npm/feather-icons/dist/feather.min.js"></script>
+    <script>
+        // Initialize Feather icons
+        document.addEventListener('DOMContentLoaded', () => {
+            feather.replace();
+        });
+    </script>
+</body>
+</html>

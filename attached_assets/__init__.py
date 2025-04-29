@@ -1,0 +1,1 @@
+# This file makes attached_assets a proper Python package
