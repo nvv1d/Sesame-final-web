@@ -1,4 +1,3 @@
-
 // Web Voice Chat Client with WebSocket proxy
 document.addEventListener('DOMContentLoaded', function() {
     // DOM elements
@@ -26,7 +25,8 @@ document.addEventListener('DOMContentLoaded', function() {
     let audioQueue = [];
     let isPlayingFromQueue = false;
     let lastPlayTime = 0;
-    const MIN_GAP_BETWEEN_CHUNKS = 50; // milliseconds
+    // Load audio settings from external file
+    // This will be automatically loaded from audio-settings.js
 
     let audioVisualizerInstance = null;
 
@@ -56,6 +56,51 @@ document.addEventListener('DOMContentLoaded', function() {
     stopButton.addEventListener('click', stopVoiceChat);
     characterSelect.addEventListener('change', updateCharacterDisplay);
 
+    // Add recovery button function definition 
+    function addRecoveryButton() {
+        // Check if button already exists
+        if (document.getElementById('recovery-button')) {
+            return;
+        }
+
+        const controlsContainer = document.querySelector('.controls');
+        if (!controlsContainer) return;
+
+        const recoveryButton = document.createElement('button');
+        recoveryButton.id = 'recovery-button';
+        recoveryButton.className = 'secondary-button';
+        recoveryButton.textContent = 'Reconnect Audio';
+        recoveryButton.addEventListener('click', function() {
+            // Try to reconnect the audio pipeline
+            logStatus('Manual audio reconnection requested');
+
+            if (isRunning) {
+                // Try to request server reconnection
+                if (requestReconnection()) {
+                    logStatus('Reconnection request sent');
+                } else {
+                    // If server connection is down, try to restart the audio context
+                    if (audioContext) {
+                        audioContext.close().then(() => {
+                            audioContext = new AudioContext({ sampleRate: sampleRate });
+                            addAudioContextStateListener();
+                            audioContext.resume().then(() => {
+                                logStatus('Audio context restarted');
+                            });
+                        }).catch(err => {
+                            logStatus('Failed to restart audio: ' + err.message);
+                        });
+                    }
+                }
+            } else {
+                logStatus('Cannot reconnect when not running');
+            }
+        });
+
+        // Insert before the stop button
+        controlsContainer.insertBefore(recoveryButton, stopButton);
+    }
+    
     // Add recovery button
     addRecoveryButton();
 
@@ -136,17 +181,28 @@ document.addEventListener('DOMContentLoaded', function() {
      */
     function addAudioContextStateListener() {
         if (audioContext) {
-            audioContext.onstatechange = function() {
-                console.log('Audio context state changed to:', audioContext.state);
-                logStatus(`Audio state: ${audioContext.state}`);
+            audioContext.onstatechange = function(event) {
+                try {
+                    // Check if audioContext is still valid when this event fires
+                    if (!audioContext) {
+                        console.log('Audio context was null during state change event');
+                        return;
+                    }
+                    
+                    console.log('Audio context state changed to:', audioContext.state);
+                    logStatus(`Audio state: ${audioContext.state}`);
 
-                // If it becomes suspended, try to resume it automatically
-                if (audioContext.state === 'suspended' && isRunning) {
-                    audioContext.resume().then(() => {
-                        logStatus('Audio context resumed automatically');
-                    }).catch(err => {
-                        logStatus('Failed to auto-resume: ' + err.message);
-                    });
+                    // If it becomes suspended, try to resume it automatically
+                    if (audioContext && audioContext.state === 'suspended' && isRunning) {
+                        audioContext.resume().then(() => {
+                            logStatus('Audio context resumed automatically');
+                        }).catch(err => {
+                            logStatus('Failed to auto-resume: ' + err.message);
+                        });
+                    }
+                } catch (err) {
+                    console.error('Error in audio context state change handler:', err);
+                    logStatus('Audio context error: ' + err.message);
                 }
             };
         }
@@ -352,7 +408,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
             // Initialize audio context - FIXED: Always create a new instance
             audioContext = new AudioContext({ sampleRate: sampleRate });
-            
+
             // Ensure audio context is running
             if (audioContext.state !== 'running') {
                 await audioContext.resume();
@@ -393,7 +449,7 @@ document.addEventListener('DOMContentLoaded', function() {
             audioQueue = [];
             isPlayingFromQueue = false;
             lastPlayTime = 0;
-            
+
             // Close WebSocket
             if (socket) {
                 socket.close();
@@ -460,7 +516,7 @@ document.addEventListener('DOMContentLoaded', function() {
         } catch (error) {
             console.error('Error stopping voice chat:', error);
             logStatus(`Error stopping: ${error.message}`);
-            
+
             // Still enable UI controls even if there's an error
             startButton.disabled = false;
             stopButton.disabled = true;
@@ -570,9 +626,28 @@ document.addEventListener('DOMContentLoaded', function() {
             logStatus('Attempting to reconnect browser WebSocket...');
             setTimeout(function() {
                 if (isRunning && sessionId) {
-                    connectWebSocket();
+                    try {
+                        connectWebSocket();
+                    } catch (err) {
+                        console.error('Reconnection failed:', err);
+                        logStatus('Failed to reconnect: ' + err.message);
+                        
+                        // If still running, try again after a longer delay
+                        if (isRunning) {
+                            setTimeout(function() {
+                                if (isRunning && sessionId) {
+                                    try {
+                                        connectWebSocket();
+                                    } catch (err2) {
+                                        console.error('Second reconnection attempt failed:', err2);
+                                        logStatus('Reconnection attempts exhausted');
+                                    }
+                                }
+                            }, 5000); // Wait 5 seconds before second retry
+                        }
+                    }
                 }
-            }, 2000); // Wait 2 seconds before reconnecting
+            }, 2000); // Wait 2 seconds before first reconnect attempt
         } else if (!isRunning) {
             // Clean stop requested
             logStatus('Session stopped');
@@ -584,7 +659,10 @@ document.addEventListener('DOMContentLoaded', function() {
      */
     function handleSocketError(error) {
         console.error('WebSocket error:', error);
-        logStatus('WebSocket error occurred');
+        logStatus('WebSocket error detected - this may cause audio interruptions');
+        
+        // Don't immediately close socket here - let the close handler deal with reconnection
+        // if the error leads to a close event
     }
 
     /**
@@ -693,17 +771,17 @@ document.addEventListener('DOMContentLoaded', function() {
         try {
             // Decode base64 audio data
             const byteArray = base64ToArrayBuffer(audioData);
-            
+
             // Convert byteArray to Int16Array (16-bit PCM format)
             const int16Data = new Int16Array(byteArray);
-            
+
             // Use provided sample rate or default to high quality
             const effectiveSampleRate = sampleRate || 24000;
             const frameCount = int16Data.length;
-            
+
             // Calculate duration of this audio chunk
             const durationMs = (frameCount / effectiveSampleRate) * 1000;
-            
+
             // Create audio processing object with timestamp for debugging
             const audioChunk = {
                 data: int16Data,
@@ -713,15 +791,15 @@ document.addEventListener('DOMContentLoaded', function() {
                 preserveQuality: preserveQuality,
                 timestamp: Date.now()
             };
-            
+
             // Add to queue for sequential playback
             audioQueue.push(audioChunk);
-            
+
             // Start playing if not already
             if (!isPlayingFromQueue) {
                 processAudioQueue();
             }
-            
+
         } catch (error) {
             console.error('Error queuing audio:', error);
         }
@@ -735,12 +813,50 @@ document.addEventListener('DOMContentLoaded', function() {
             isPlayingFromQueue = false;
             return;
         }
-        
+
+        // Safety check to make sure AUDIO_SETTINGS is available
+        if (typeof AUDIO_SETTINGS === 'undefined') {
+            console.error('AUDIO_SETTINGS not defined - using defaults');
+            // Fallback defaults if audio-settings.js failed to load
+            AUDIO_SETTINGS = {
+                minGapBetweenChunks: 20,
+                maxQueueSize: 10,
+                audioEnhancements: {
+                    enableHighPassFilter: true,
+                    highPassFrequency: 70,
+                    enableLowPassFilter: true,
+                    lowPassFrequency: 14000,
+                    enableCompressor: true,
+                    masterGain: 1.0
+                }
+            };
+        }
+
         // Check if audio context exists and is running
-        if (!audioContext || audioContext.state !== 'running') {
-            console.warn('Audio context not available or suspended');
+        if (!audioContext) {
+            console.warn('Audio context not available');
+            isPlayingFromQueue = false;
+            
+            // If we're still supposed to be running, try to recreate audio context
+            if (isRunning) {
+                try {
+                    audioContext = new AudioContext({ sampleRate: sampleRate });
+                    audioContext.resume().then(() => {
+                        console.log('Created new audio context');
+                        // Try processing queue again
+                        setTimeout(processAudioQueue, 100);
+                    });
+                } catch (err) {
+                    console.error('Failed to create new audio context:', err);
+                }
+            }
+            return;
+        }
+        
+        if (audioContext.state !== 'running') {
+            console.warn('Audio context suspended');
             // Try to resume if suspended
-            if (audioContext && audioContext.state === 'suspended') {
+            if (audioContext.state === 'suspended') {
                 audioContext.resume().then(() => {
                     console.log('Audio context resumed');
                     // Try processing queue again
@@ -754,51 +870,58 @@ document.addEventListener('DOMContentLoaded', function() {
             }
             return;
         }
-        
+
         isPlayingFromQueue = true;
         const now = Date.now();
-        
+
         // Respect minimum gap between audio chunks
         const timeSinceLastPlay = now - lastPlayTime;
-        if (timeSinceLastPlay < MIN_GAP_BETWEEN_CHUNKS && lastPlayTime !== 0) {
+        if (timeSinceLastPlay < AUDIO_SETTINGS.minGapBetweenChunks && lastPlayTime !== 0) {
             // Wait before playing next chunk
-            setTimeout(processAudioQueue, MIN_GAP_BETWEEN_CHUNKS - timeSinceLastPlay);
+            setTimeout(processAudioQueue, AUDIO_SETTINGS.minGapBetweenChunks - timeSinceLastPlay);
             return;
         }
         
+        // Limit queue size to prevent memory issues
+        if (audioQueue.length > AUDIO_SETTINGS.maxQueueSize) {
+            // Keep only the most recent chunks if queue gets too large
+            audioQueue = audioQueue.slice(-AUDIO_SETTINGS.maxQueueSize);
+            console.log(`Queue trimmed to ${AUDIO_SETTINGS.maxQueueSize} items to prevent memory issues`);
+        }
+
         // Get next audio chunk
         const chunk = audioQueue.shift();
         lastPlayTime = now;
-        
+
         try {
             // Create an audio buffer
             const audioBuffer = audioContext.createBuffer(1, chunk.frameCount, chunk.sampleRate);
-            
+
             // Get the raw audio data and convert from Int16 to Float32 format
             const channelData = audioBuffer.getChannelData(0);
             for (let i = 0; i < chunk.frameCount; i++) {
                 // Convert from Int16 (-32768 to 32767) to Float32 (-1.0 to 1.0) with improved precision
                 channelData[i] = chunk.data[i] / 32768.0;
             }
-            
+
             // Create audio source
             const source = audioContext.createBufferSource();
             source.buffer = audioBuffer;
-            
+
             // Create higher quality audio pipeline
             let outputNode = source;
-            
+
             if (chunk.preserveQuality) {
                 // Create a high-pass filter to remove rumble
                 const highPass = audioContext.createBiquadFilter();
                 highPass.type = "highpass";
                 highPass.frequency.value = 80;    // Cut below 80Hz
-                
+
                 // Create a low-pass filter to remove high-frequency noise
                 const lowPass = audioContext.createBiquadFilter();
                 lowPass.type = "lowpass";
                 lowPass.frequency.value = 12000;  // Cut above 12kHz
-                
+
                 // Add compressor with speech-optimized settings
                 const compressor = audioContext.createDynamicsCompressor();
                 compressor.threshold.value = -24;  // More aggressive compression for clarity
@@ -806,25 +929,25 @@ document.addEventListener('DOMContentLoaded', function() {
                 compressor.ratio.value = 3;        // Moderate ratio for natural sound
                 compressor.attack.value = 0.003;   // Faster attack to catch transients
                 compressor.release.value = 0.15;   // Quicker release for better intelligibility
-                
+
                 // Mid-range boost for voice clarity
                 const clarityEQ = audioContext.createBiquadFilter();
                 clarityEQ.type = "peaking";        
                 clarityEQ.frequency.value = 2800;  // Focus on speech intelligibility range  
                 clarityEQ.Q.value = 1.0;           // Wider width for natural sound
                 clarityEQ.gain.value = 4;          // +4dB boost for clarity
-                
+
                 // Presence boost
                 const presenceEQ = audioContext.createBiquadFilter();
                 presenceEQ.type = "peaking";
                 presenceEQ.frequency.value = 5000; // Add presence
                 presenceEQ.Q.value = 1.5;
                 presenceEQ.gain.value = 2;         // +2dB boost
-                
+
                 // Master gain
                 const gainNode = audioContext.createGain();
                 gainNode.gain.value = 1.0;         // Full volume
-                
+
                 // Connect through our enhanced pipeline
                 source.connect(highPass);
                 highPass.connect(clarityEQ);
@@ -834,16 +957,16 @@ document.addEventListener('DOMContentLoaded', function() {
                 compressor.connect(gainNode);
                 outputNode = gainNode;
             }
-            
+
             // Connect to destination
             outputNode.connect(audioContext.destination);
-            
+
             // When playback ends, process next chunk
             source.onended = processAudioQueue;
-            
+
             // Start playing with slight delay to prevent clicks
             source.start(audioContext.currentTime + 0.01);
-            
+
             // Visualize the audio
             if (audioVisualizerInstance) {
                 const visualData = new Float32Array(chunk.frameCount);
@@ -852,7 +975,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
                 audioVisualizerInstance.updateOutputData(visualData);
             }
-            
+
         } catch (error) {
             console.error('Error playing audio chunk:', error);
             // Continue with queue even if one chunk fails
