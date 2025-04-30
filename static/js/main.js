@@ -90,36 +90,7 @@ document.addEventListener('DOMContentLoaded', function() {
         try {
             logStatus('Initializing audio devices...');
 
-            // Request permissions to get device list - with timeout
-            const permissionPromise = navigator.mediaDevices.getUserMedia({ audio: true })
-                .then(stream => {
-                    // Stop the stream immediately after getting permission
-                    stream.getTracks().forEach(track => track.stop());
-                    return true;
-                });
-
-            // Add timeout to avoid hanging indefinitely
-            const timeoutPromise = new Promise((_, reject) => {
-                setTimeout(() => reject(new Error('Timeout requesting microphone permission')), 10000);
-            });
-
-            // Race between permission and timeout
-            await Promise.race([permissionPromise, timeoutPromise]);
-
-            // Get device list
-            const devices = await navigator.mediaDevices.enumerateDevices();
-
-            // Populate inputs and outputs
-            const inputDevices = devices.filter(device => device.kind === 'audioinput');
-            const outputDevices = devices.filter(device => device.kind === 'audiooutput');
-
-            // Log device counts for debugging
-            console.log(`Found ${inputDevices.length} input devices and ${outputDevices.length} output devices`);
-
-            if (inputDevices.length === 0) {
-                logStatus('Warning: No microphone devices detected');
-            }
-
+            // Set up default options even before permissions to ensure UI is responsive
             // Clear select options
             inputDeviceSelect.innerHTML = '';
             outputDeviceSelect.innerHTML = '';
@@ -136,29 +107,74 @@ document.addEventListener('DOMContentLoaded', function() {
             defaultOutputOption.text = 'Default Speaker';
             outputDeviceSelect.appendChild(defaultOutputOption);
 
-            // Add input devices
-            inputDevices.forEach(device => {
-                const option = document.createElement('option');
-                option.value = device.deviceId;
-                option.text = device.label || `Microphone ${inputDeviceSelect.length}`;
-                inputDeviceSelect.appendChild(option);
-            });
+            // Try to get permissions with a timeout
+            try {
+                // Request permissions to get device list - with timeout
+                const permissionPromise = navigator.mediaDevices.getUserMedia({ audio: true })
+                    .then(stream => {
+                        // Stop the stream immediately after getting permission
+                        stream.getTracks().forEach(track => track.stop());
+                        return true;
+                    });
 
-            // Add output devices
-            outputDevices.forEach(device => {
-                const option = document.createElement('option');
-                option.value = device.deviceId;
-                option.text = device.label || `Speaker ${outputDeviceSelect.length}`;
-                outputDeviceSelect.appendChild(option);
-            });
+                // Add timeout to avoid hanging indefinitely
+                const timeoutPromise = new Promise((_, reject) => {
+                    setTimeout(() => reject(new Error('Timeout requesting microphone permission')), 10000);
+                });
 
-            logStatus('Audio devices loaded successfully');
+                // Race between permission and timeout
+                await Promise.race([permissionPromise, timeoutPromise]);
+
+                // Get device list
+                const devices = await navigator.mediaDevices.enumerateDevices();
+
+                // Populate inputs and outputs
+                const inputDevices = devices.filter(device => device.kind === 'audioinput');
+                const outputDevices = devices.filter(device => device.kind === 'audiooutput');
+
+                // Log device counts for debugging
+                console.log(`Found ${inputDevices.length} input devices and ${outputDevices.length} output devices`);
+
+                if (inputDevices.length === 0) {
+                    logStatus('Warning: No microphone devices detected, using defaults');
+                }
+
+                // Add input devices if available
+                if (inputDevices.length > 0) {
+                    inputDevices.forEach(device => {
+                        const option = document.createElement('option');
+                        option.value = device.deviceId;
+                        option.text = device.label || `Microphone ${inputDeviceSelect.children.length}`;
+                        inputDeviceSelect.appendChild(option);
+                    });
+                }
+
+                // Add output devices if available
+                if (outputDevices.length > 0) {
+                    outputDevices.forEach(device => {
+                        const option = document.createElement('option');
+                        option.value = device.deviceId;
+                        option.text = device.label || `Speaker ${outputDeviceSelect.children.length}`;
+                        outputDeviceSelect.appendChild(option);
+                    });
+                }
+
+                logStatus('Audio devices loaded successfully');
+            } catch (permError) {
+                console.warn('Could not get device permissions:', permError);
+                logStatus('Using default audio devices - permission issue');
+                // Continue with default devices only
+            }
+
+            // Enable the start button regardless of device detection
+            startButton.disabled = false;
 
         } catch (error) {
             console.error('Error initializing audio devices:', error);
-            logStatus(`Error: Could not access audio devices. ${error.message}`);
-            // Re-throw to be handled by the caller
-            throw error;
+            logStatus(`Error: Using default devices. ${error.message}`);
+            
+            // Don't throw - just use default devices instead
+            startButton.disabled = false;
         }
     }
 
@@ -775,9 +791,10 @@ document.addEventListener('DOMContentLoaded', function() {
             const deviceId = inputDeviceSelect.value;
 
             // Set up constraints with improved audio quality settings
+            // Use more relaxed constraints to avoid failures
             const constraints = {
                 audio: {
-                    deviceId: deviceId ? { exact: deviceId } : undefined,
+                    deviceId: deviceId ? { ideal: deviceId } : undefined, // Use 'ideal' instead of 'exact'
                     sampleRate: { ideal: 44100 }, // Higher sample rate for better quality
                     channelCount: { ideal: 1 },
                     echoCancellation: true,
@@ -786,13 +803,24 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             };
 
-            // Get media stream with timeout
-            const streamPromise = navigator.mediaDevices.getUserMedia(constraints);
-            const timeoutPromise = new Promise((_, reject) => {
-                setTimeout(() => reject(new Error('Timeout getting microphone stream')), 10000);
-            });
+            // First try with selected device
+            try {
+                // Get media stream with timeout
+                const streamPromise = navigator.mediaDevices.getUserMedia(constraints);
+                const timeoutPromise = new Promise((_, reject) => {
+                    setTimeout(() => reject(new Error('Timeout getting microphone stream')), 10000);
+                });
 
-            mediaStream = await Promise.race([streamPromise, timeoutPromise]);
+                mediaStream = await Promise.race([streamPromise, timeoutPromise]);
+                logStatus('Connected to selected microphone');
+            } catch (deviceError) {
+                console.warn('Failed to use selected device, falling back to default:', deviceError);
+                logStatus('Falling back to default microphone');
+                
+                // Fall back to any available microphone
+                const fallbackConstraints = { audio: true };
+                mediaStream = await navigator.mediaDevices.getUserMedia(fallbackConstraints);
+            }
 
             // Create audio source
             audioInput = audioContext.createMediaStreamSource(mediaStream);
@@ -813,10 +841,11 @@ document.addEventListener('DOMContentLoaded', function() {
             // Add audio context state listener
             addAudioContextStateListener();
 
-            logStatus('Microphone connected with enhanced quality settings');
+            logStatus('Microphone connected successfully');
 
         } catch (error) {
             console.error('Error setting up microphone:', error);
+            logStatus(`Microphone error: ${error.message}`);
             throw new Error('Could not access microphone: ' + error.message);
         }
     }
