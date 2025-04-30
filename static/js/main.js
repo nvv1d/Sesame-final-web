@@ -84,11 +84,18 @@ document.addEventListener('DOMContentLoaded', function() {
     updateCharacterDisplay();
 
 /**
- * Initialize audio devices with improved error handling
+ * Initialize audio devices with robust error handling and fallbacks
  */
 async function initializeAudioDevices() {
     try {
         logStatus('Initializing audio devices...');
+
+        // References to the select elements
+        if (!inputDeviceSelect || !outputDeviceSelect) {
+            console.error('Device select elements not found');
+            logStatus('Error: UI elements not found');
+            return;
+        }
 
         // Clear select options completely
         inputDeviceSelect.innerHTML = '';
@@ -112,6 +119,8 @@ async function initializeAudioDevices() {
 
         // Try to get permissions with a timeout
         try {
+            logStatus('Requesting microphone access...');
+            
             // Request permissions to get device list - with timeout
             const permissionPromise = navigator.mediaDevices.getUserMedia({ audio: true })
                 .then(stream => {
@@ -127,11 +136,17 @@ async function initializeAudioDevices() {
 
             // Race between permission and timeout
             await Promise.race([permissionPromise, timeoutPromise]);
+            logStatus('Access granted, loading devices...');
+
+            // Check if mediaDevices is available and has enumerateDevices method
+            if (!navigator.mediaDevices || typeof navigator.mediaDevices.enumerateDevices !== 'function') {
+                throw new Error('Media devices API not supported in this browser');
+            }
 
             // Get device list
             const devices = await navigator.mediaDevices.enumerateDevices();
 
-            // Populate inputs and outputs
+            // Filter out input and output devices
             const inputDevices = devices.filter(device => device.kind === 'audioinput');
             const outputDevices = devices.filter(device => device.kind === 'audiooutput');
 
@@ -150,9 +165,11 @@ async function initializeAudioDevices() {
                     option.text = device.label || `Microphone ${inputDeviceSelect.children.length}`;
                     inputDeviceSelect.appendChild(option);
                 });
+                logStatus('Microphone devices loaded');
             }
 
-            // Add output devices if available
+            // Add output devices if available and the browser supports output device selection
+            // Note: Not all browsers support audiooutput enumeration or selection
             if (outputDevices.length > 0) {
                 outputDevices.forEach(device => {
                     const option = document.createElement('option');
@@ -160,28 +177,52 @@ async function initializeAudioDevices() {
                     option.text = device.label || `Speaker ${outputDeviceSelect.children.length}`;
                     outputDeviceSelect.appendChild(option);
                 });
+                logStatus('Speaker devices loaded');
+            } else if ('sinkId' in HTMLMediaElement.prototype) {
+                // If we have the setSinkId API but no devices, log a warning
+                logStatus('Warning: No speaker devices detected, using default');
+            } else {
+                // If the browser doesn't support output device selection
+                logStatus('Note: This browser does not support speaker selection');
+                // Optionally disable the output select
+                // outputDeviceSelect.disabled = true;
             }
 
-            logStatus('Audio devices loaded successfully');
         } catch (permError) {
             console.warn('Could not get device permissions:', permError);
-            logStatus('Using default audio devices - permission issue');
+            
+            if (permError.name === 'NotAllowedError') {
+                logStatus('Microphone access denied. Please allow microphone access.');
+            } else if (permError.name === 'NotFoundError') {
+                logStatus('No microphone found. Please connect a microphone.');
+            } else if (permError.message.includes('Timeout')) {
+                logStatus('Timed out waiting for microphone permission.');
+            } else {
+                logStatus(`Using default audio devices - ${permError.name || 'permission issue'}`);
+            }
+            
             // Continue with default devices only
         }
 
         // Enable the start button regardless of device detection
-        startButton.disabled = false;
+        if (startButton) {
+            startButton.disabled = false;
+        } else {
+            console.warn('Start button not found');
+        }
+
+        logStatus('Audio setup complete');
 
     } catch (error) {
         console.error('Error initializing audio devices:', error);
         logStatus(`Error: Using default devices. ${error.message}`);
         
         // Make sure we still enable selects even on error
-        inputDeviceSelect.disabled = false;
-        outputDeviceSelect.disabled = false;
+        if (inputDeviceSelect) inputDeviceSelect.disabled = false;
+        if (outputDeviceSelect) outputDeviceSelect.disabled = false;
         
         // Don't throw - just use default devices instead
-        startButton.disabled = false;
+        if (startButton) startButton.disabled = false;
     }
 }
     
