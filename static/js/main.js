@@ -1,3 +1,4 @@
+
 // Web Voice Chat Client with WebSocket proxy
 document.addEventListener('DOMContentLoaded', function() {
     // DOM elements
@@ -12,9 +13,6 @@ document.addEventListener('DOMContentLoaded', function() {
     const outputDeviceSelect = document.getElementById('output-device');
     const characterName = document.getElementById('character-name');
     const audioVisualizer = document.getElementById('audio-visualizer');
-    
-    // Add recovery button
-    addRecoveryButton();
 
     // Initialize audio context
     const AudioContext = window.AudioContext || window.webkitAudioContext;
@@ -58,7 +56,10 @@ document.addEventListener('DOMContentLoaded', function() {
     stopButton.addEventListener('click', stopVoiceChat);
     characterSelect.addEventListener('change', updateCharacterDisplay);
 
-    // Add audio context resume function to handle suspended state - MOVED OUTSIDE OF INITIALIZATION
+    // Add recovery button
+    addRecoveryButton();
+
+    // Add audio context resume function to handle suspended state
     function ensureAudioContextRunning() {
         if (audioContext && audioContext.state !== 'running') {
             audioContext.resume().then(() => {
@@ -69,7 +70,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
-    // Call this when handling user interaction - MOVED OUTSIDE OF INITIALIZATION
+    // Call this when handling user interaction
     document.addEventListener('click', ensureAudioContextRunning);
 
     // Initialize audio devices with error handling
@@ -83,149 +84,217 @@ document.addEventListener('DOMContentLoaded', function() {
     // Initialize character display
     updateCharacterDisplay();
 
-/**
- * Initialize audio devices with robust error handling and fallbacks
- */
-async function initializeAudioDevices() {
-    try {
-        logStatus('Initializing audio devices...');
-
-        // References to the select elements
-        if (!inputDeviceSelect || !outputDeviceSelect) {
-            console.error('Device select elements not found');
-            logStatus('Error: UI elements not found');
+    /**
+     * Add a recovery button to the UI for manual reconnection
+     */
+    function addRecoveryButton() {
+        // Check if button already exists
+        if (document.getElementById('recovery-button')) {
             return;
         }
 
-        // Clear select options completely
-        inputDeviceSelect.innerHTML = '';
-        outputDeviceSelect.innerHTML = '';
+        const controlsContainer = document.querySelector('.controls');
+        if (!controlsContainer) return;
 
-        // Add default option for input
-        const defaultInputOption = document.createElement('option');
-        defaultInputOption.value = '';
-        defaultInputOption.text = 'Default Microphone';
-        inputDeviceSelect.appendChild(defaultInputOption);
+        const recoveryButton = document.createElement('button');
+        recoveryButton.id = 'recovery-button';
+        recoveryButton.className = 'secondary-button';
+        recoveryButton.textContent = 'Reconnect Audio';
+        recoveryButton.addEventListener('click', function() {
+            // Try to reconnect the audio pipeline
+            logStatus('Manual audio reconnection requested');
 
-        // Add default option for output
-        const defaultOutputOption = document.createElement('option');
-        defaultOutputOption.value = '';
-        defaultOutputOption.text = 'Default Speaker';
-        outputDeviceSelect.appendChild(defaultOutputOption);
-
-        // Enable the selects right away to avoid appearing stuck
-        inputDeviceSelect.disabled = false;
-        outputDeviceSelect.disabled = false;
-
-        // Try to get permissions with a timeout
-        try {
-            logStatus('Requesting microphone access...');
-            
-            // Request permissions to get device list - with timeout
-            const permissionPromise = navigator.mediaDevices.getUserMedia({ audio: true })
-                .then(stream => {
-                    // Stop the stream immediately after getting permission
-                    stream.getTracks().forEach(track => track.stop());
-                    return true;
-                });
-
-            // Add timeout to avoid hanging indefinitely
-            const timeoutPromise = new Promise((_, reject) => {
-                setTimeout(() => reject(new Error('Timeout requesting microphone permission')), 10000);
-            });
-
-            // Race between permission and timeout
-            await Promise.race([permissionPromise, timeoutPromise]);
-            logStatus('Access granted, loading devices...');
-
-            // Check if mediaDevices is available and has enumerateDevices method
-            if (!navigator.mediaDevices || typeof navigator.mediaDevices.enumerateDevices !== 'function') {
-                throw new Error('Media devices API not supported in this browser');
-            }
-
-            // Get device list
-            const devices = await navigator.mediaDevices.enumerateDevices();
-
-            // Filter out input and output devices
-            const inputDevices = devices.filter(device => device.kind === 'audioinput');
-            const outputDevices = devices.filter(device => device.kind === 'audiooutput');
-
-            // Log device counts for debugging
-            console.log(`Found ${inputDevices.length} input devices and ${outputDevices.length} output devices`);
-
-            if (inputDevices.length === 0) {
-                logStatus('Warning: No microphone devices detected, using defaults');
-            }
-
-            // Add input devices if available
-            if (inputDevices.length > 0) {
-                inputDevices.forEach(device => {
-                    const option = document.createElement('option');
-                    option.value = device.deviceId;
-                    option.text = device.label || `Microphone ${inputDeviceSelect.children.length}`;
-                    inputDeviceSelect.appendChild(option);
-                });
-                logStatus('Microphone devices loaded');
-            }
-
-            // Add output devices if available and the browser supports output device selection
-            // Note: Not all browsers support audiooutput enumeration or selection
-            if (outputDevices.length > 0) {
-                outputDevices.forEach(device => {
-                    const option = document.createElement('option');
-                    option.value = device.deviceId;
-                    option.text = device.label || `Speaker ${outputDeviceSelect.children.length}`;
-                    outputDeviceSelect.appendChild(option);
-                });
-                logStatus('Speaker devices loaded');
-            } else if ('sinkId' in HTMLMediaElement.prototype) {
-                // If we have the setSinkId API but no devices, log a warning
-                logStatus('Warning: No speaker devices detected, using default');
+            if (isRunning) {
+                // Try to request server reconnection
+                if (requestReconnection()) {
+                    logStatus('Reconnection request sent');
+                } else {
+                    // If server connection is down, try to restart the audio context
+                    if (audioContext) {
+                        audioContext.close().then(() => {
+                            audioContext = new AudioContext({ sampleRate: sampleRate });
+                            addAudioContextStateListener();
+                            audioContext.resume().then(() => {
+                                logStatus('Audio context restarted');
+                            });
+                        }).catch(err => {
+                            logStatus('Failed to restart audio: ' + err.message);
+                        });
+                    }
+                }
             } else {
-                // If the browser doesn't support output device selection
-                logStatus('Note: This browser does not support speaker selection');
-                // Optionally disable the output select
-                // outputDeviceSelect.disabled = true;
+                logStatus('Cannot reconnect when not running');
             }
+        });
 
-        } catch (permError) {
-            console.warn('Could not get device permissions:', permError);
-            
-            if (permError.name === 'NotAllowedError') {
-                logStatus('Microphone access denied. Please allow microphone access.');
-            } else if (permError.name === 'NotFoundError') {
-                logStatus('No microphone found. Please connect a microphone.');
-            } else if (permError.message.includes('Timeout')) {
-                logStatus('Timed out waiting for microphone permission.');
-            } else {
-                logStatus(`Using default audio devices - ${permError.name || 'permission issue'}`);
-            }
-            
-            // Continue with default devices only
-        }
-
-        // Enable the start button regardless of device detection
-        if (startButton) {
-            startButton.disabled = false;
-        } else {
-            console.warn('Start button not found');
-        }
-
-        logStatus('Audio setup complete');
-
-    } catch (error) {
-        console.error('Error initializing audio devices:', error);
-        logStatus(`Error: Using default devices. ${error.message}`);
-        
-        // Make sure we still enable selects even on error
-        if (inputDeviceSelect) inputDeviceSelect.disabled = false;
-        if (outputDeviceSelect) outputDeviceSelect.disabled = false;
-        
-        // Don't throw - just use default devices instead
-        if (startButton) startButton.disabled = false;
+        // Insert before the stop button
+        controlsContainer.insertBefore(recoveryButton, stopButton);
     }
-}
-    
+
+    /**
+     * Add audio context state listener for debugging
+     */
+    function addAudioContextStateListener() {
+        if (audioContext) {
+            audioContext.onstatechange = function() {
+                console.log('Audio context state changed to:', audioContext.state);
+                logStatus(`Audio state: ${audioContext.state}`);
+
+                // If it becomes suspended, try to resume it automatically
+                if (audioContext.state === 'suspended' && isRunning) {
+                    audioContext.resume().then(() => {
+                        logStatus('Audio context resumed automatically');
+                    }).catch(err => {
+                        logStatus('Failed to auto-resume: ' + err.message);
+                    });
+                }
+            };
+        }
+    }
+
+    /**
+     * Initialize audio devices with robust error handling and fallbacks
+     */
+    async function initializeAudioDevices() {
+        try {
+            logStatus('Initializing audio devices...');
+
+            // References to the select elements
+            if (!inputDeviceSelect || !outputDeviceSelect) {
+                console.error('Device select elements not found');
+                logStatus('Error: UI elements not found');
+                return;
+            }
+
+            // Clear select options completely
+            inputDeviceSelect.innerHTML = '';
+            outputDeviceSelect.innerHTML = '';
+
+            // Add default option for input
+            const defaultInputOption = document.createElement('option');
+            defaultInputOption.value = '';
+            defaultInputOption.text = 'Default Microphone';
+            inputDeviceSelect.appendChild(defaultInputOption);
+
+            // Add default option for output
+            const defaultOutputOption = document.createElement('option');
+            defaultOutputOption.value = '';
+            defaultOutputOption.text = 'Default Speaker';
+            outputDeviceSelect.appendChild(defaultOutputOption);
+
+            // Enable the selects right away to avoid appearing stuck
+            inputDeviceSelect.disabled = false;
+            outputDeviceSelect.disabled = false;
+
+            // Try to get permissions with a timeout
+            try {
+                logStatus('Requesting microphone access...');
+
+                // Request permissions to get device list - with timeout
+                const permissionPromise = navigator.mediaDevices.getUserMedia({ audio: true })
+                    .then(stream => {
+                        // Stop the stream immediately after getting permission
+                        stream.getTracks().forEach(track => track.stop());
+                        return true;
+                    });
+
+                // Add timeout to avoid hanging indefinitely
+                const timeoutPromise = new Promise((_, reject) => {
+                    setTimeout(() => reject(new Error('Timeout requesting microphone permission')), 10000);
+                });
+
+                // Race between permission and timeout
+                await Promise.race([permissionPromise, timeoutPromise]);
+                logStatus('Access granted, loading devices...');
+
+                // Check if mediaDevices is available and has enumerateDevices method
+                if (!navigator.mediaDevices || typeof navigator.mediaDevices.enumerateDevices !== 'function') {
+                    throw new Error('Media devices API not supported in this browser');
+                }
+
+                // Get device list
+                const devices = await navigator.mediaDevices.enumerateDevices();
+
+                // Filter out input and output devices
+                const inputDevices = devices.filter(device => device.kind === 'audioinput');
+                const outputDevices = devices.filter(device => device.kind === 'audiooutput');
+
+                // Log device counts for debugging
+                console.log(`Found ${inputDevices.length} input devices and ${outputDevices.length} output devices`);
+
+                if (inputDevices.length === 0) {
+                    logStatus('Warning: No microphone devices detected, using defaults');
+                }
+
+                // Add input devices if available
+                if (inputDevices.length > 0) {
+                    inputDevices.forEach(device => {
+                        const option = document.createElement('option');
+                        option.value = device.deviceId;
+                        option.text = device.label || `Microphone ${inputDeviceSelect.children.length}`;
+                        inputDeviceSelect.appendChild(option);
+                    });
+                    logStatus('Microphone devices loaded');
+                }
+
+                // Add output devices if available and the browser supports output device selection
+                // Note: Not all browsers support audiooutput enumeration or selection
+                if (outputDevices.length > 0) {
+                    outputDevices.forEach(device => {
+                        const option = document.createElement('option');
+                        option.value = device.deviceId;
+                        option.text = device.label || `Speaker ${outputDeviceSelect.children.length}`;
+                        outputDeviceSelect.appendChild(option);
+                    });
+                    logStatus('Speaker devices loaded');
+                } else if ('sinkId' in HTMLMediaElement.prototype) {
+                    // If we have the setSinkId API but no devices, log a warning
+                    logStatus('Warning: No speaker devices detected, using default');
+                } else {
+                    // If the browser doesn't support output device selection
+                    logStatus('Note: This browser does not support speaker selection');
+                    // Optionally disable the output select
+                    // outputDeviceSelect.disabled = true;
+                }
+
+            } catch (permError) {
+                console.warn('Could not get device permissions:', permError);
+
+                if (permError.name === 'NotAllowedError') {
+                    logStatus('Microphone access denied. Please allow microphone access.');
+                } else if (permError.name === 'NotFoundError') {
+                    logStatus('No microphone found. Please connect a microphone.');
+                } else if (permError.message.includes('Timeout')) {
+                    logStatus('Timed out waiting for microphone permission.');
+                } else {
+                    logStatus(`Using default audio devices - ${permError.name || 'permission issue'}`);
+                }
+
+                // Continue with default devices only
+            }
+
+            // Enable the start button regardless of device detection
+            if (startButton) {
+                startButton.disabled = false;
+            } else {
+                console.warn('Start button not found');
+            }
+
+            logStatus('Audio setup complete');
+
+        } catch (error) {
+            console.error('Error initializing audio devices:', error);
+            logStatus(`Error: Using default devices. ${error.message}`);
+
+            // Make sure we still enable selects even on error
+            if (inputDeviceSelect) inputDeviceSelect.disabled = false;
+            if (outputDeviceSelect) inputDeviceSelect.disabled = false;
+
+            // Don't throw - just use default devices instead
+            if (startButton) startButton.disabled = false;
+        }
+    }
+
     /**
      * Update character display
      */
@@ -270,19 +339,27 @@ async function initializeAudioDevices() {
             isRunning = true;
             updateStatus('Starting...');
 
+            // Clear audio queues from previous sessions
+            audioQueue = [];
+            isPlayingFromQueue = false;
+            lastPlayTime = 0;
+
             // Get selected character
             const character = characterSelect.value;
 
             // Create a new session
             await createSession(character);
 
-            // Initialize audio context
+            // Initialize audio context - FIXED: Always create a new instance
             audioContext = new AudioContext({ sampleRate: sampleRate });
-
+            
             // Ensure audio context is running
             if (audioContext.state !== 'running') {
                 await audioContext.resume();
             }
+
+            // Add audio context state listener
+            addAudioContextStateListener();
 
             // Set up microphone access
             await setupMicrophone();
@@ -312,14 +389,20 @@ async function initializeAudioDevices() {
         try {
             isRunning = false;
 
+            // Clear audio queues
+            audioQueue = [];
+            isPlayingFromQueue = false;
+            lastPlayTime = 0;
+            
             // Close WebSocket
             if (socket) {
                 socket.close();
                 socket = null;
             }
 
-            // Close audio context and streams
+            // Stop all audio processing
             if (audioProcessor) {
+                audioProcessor.onaudioprocess = null; // Remove event handler
                 audioProcessor.disconnect();
                 audioProcessor = null;
             }
@@ -334,14 +417,23 @@ async function initializeAudioDevices() {
                 audioAnalyser = null;
             }
 
+            // Stop all media tracks
             if (mediaStream) {
-                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream.getTracks().forEach(track => {
+                    track.stop();
+                });
                 mediaStream = null;
             }
 
+            // Close audio context with proper error handling
             if (audioContext) {
-                await audioContext.close();
-                audioContext = null;
+                try {
+                    await audioContext.close();
+                } catch (err) {
+                    console.warn('Error closing audio context:', err);
+                } finally {
+                    audioContext = null;
+                }
             }
 
             // Delete session on server
@@ -368,6 +460,13 @@ async function initializeAudioDevices() {
         } catch (error) {
             console.error('Error stopping voice chat:', error);
             logStatus(`Error stopping: ${error.message}`);
+            
+            // Still enable UI controls even if there's an error
+            startButton.disabled = false;
+            stopButton.disabled = true;
+            characterSelect.disabled = false;
+            inputDeviceSelect.disabled = false;
+            outputDeviceSelect.disabled = false;
         }
     }
 
@@ -463,9 +562,9 @@ async function initializeAudioDevices() {
         console.log('WebSocket closed:', event);
         isConnected = false;
         logStatus(`WebSocket closed: ${event.reason || 'Connection closed'}`);
-        
+
         updateConnectionStatus('Disconnected');
-        
+
         // If it's an abnormal closure and we're still running, try to reconnect the browser WebSocket
         if (event.code !== 1000 && isRunning) {
             logStatus('Attempting to reconnect browser WebSocket...');
@@ -476,7 +575,7 @@ async function initializeAudioDevices() {
             }, 2000); // Wait 2 seconds before reconnecting
         } else if (!isRunning) {
             // Clean stop requested
-            stopVoiceChat();
+            logStatus('Session stopped');
         }
     }
 
@@ -513,7 +612,7 @@ async function initializeAudioDevices() {
                 case 'pong':
                     // Ping response, nothing to do
                     break;
-                    
+
                 case 'reconnect_result':
                     if (message.success) {
                         logStatus('Reconnection successful');
@@ -583,56 +682,82 @@ async function initializeAudioDevices() {
     }
 
     /**
-     * Play audio data
+     * Play audio data with improved handling
      */
     function playAudio(audioData, sampleRate, preserveQuality = true) {
-        if (!audioContext) return;
+        if (!audioContext) {
+            console.warn('Attempting to play audio without audio context');
+            return;
+        }
 
         try {
             // Decode base64 audio data
             const byteArray = base64ToArrayBuffer(audioData);
-
+            
             // Convert byteArray to Int16Array (16-bit PCM format)
             const int16Data = new Int16Array(byteArray);
-
+            
             // Use provided sample rate or default to high quality
             const effectiveSampleRate = sampleRate || 24000;
             const frameCount = int16Data.length;
-
+            
             // Calculate duration of this audio chunk
             const durationMs = (frameCount / effectiveSampleRate) * 1000;
-
-            // Create audio processing object
+            
+            // Create audio processing object with timestamp for debugging
             const audioChunk = {
                 data: int16Data,
                 sampleRate: effectiveSampleRate,
                 frameCount: frameCount,
                 duration: durationMs,
-                preserveQuality: preserveQuality
+                preserveQuality: preserveQuality,
+                timestamp: Date.now()
             };
-
+            
             // Add to queue for sequential playback
             audioQueue.push(audioChunk);
-
+            
             // Start playing if not already
             if (!isPlayingFromQueue) {
                 processAudioQueue();
             }
-
+            
         } catch (error) {
             console.error('Error queuing audio:', error);
         }
     }
 
+    /**
+     * Process audio queue with improved error handling
+     */
     function processAudioQueue() {
         if (audioQueue.length === 0) {
             isPlayingFromQueue = false;
             return;
         }
-
+        
+        // Check if audio context exists and is running
+        if (!audioContext || audioContext.state !== 'running') {
+            console.warn('Audio context not available or suspended');
+            // Try to resume if suspended
+            if (audioContext && audioContext.state === 'suspended') {
+                audioContext.resume().then(() => {
+                    console.log('Audio context resumed');
+                    // Try processing queue again
+                    setTimeout(processAudioQueue, 100);
+                }).catch(err => {
+                    console.error('Failed to resume audio context:', err);
+                    isPlayingFromQueue = false;
+                });
+            } else {
+                isPlayingFromQueue = false;
+            }
+            return;
+        }
+        
         isPlayingFromQueue = true;
         const now = Date.now();
-
+        
         // Respect minimum gap between audio chunks
         const timeSinceLastPlay = now - lastPlayTime;
         if (timeSinceLastPlay < MIN_GAP_BETWEEN_CHUNKS && lastPlayTime !== 0) {
@@ -640,181 +765,86 @@ async function initializeAudioDevices() {
             setTimeout(processAudioQueue, MIN_GAP_BETWEEN_CHUNKS - timeSinceLastPlay);
             return;
         }
-
+        
         // Get next audio chunk
         const chunk = audioQueue.shift();
         lastPlayTime = now;
-
+        
         try {
             // Create an audio buffer
             const audioBuffer = audioContext.createBuffer(1, chunk.frameCount, chunk.sampleRate);
-
+            
             // Get the raw audio data and convert from Int16 to Float32 format
             const channelData = audioBuffer.getChannelData(0);
             for (let i = 0; i < chunk.frameCount; i++) {
                 // Convert from Int16 (-32768 to 32767) to Float32 (-1.0 to 1.0) with improved precision
                 channelData[i] = chunk.data[i] / 32768.0;
             }
-
+            
             // Create audio source
             const source = audioContext.createBufferSource();
             source.buffer = audioBuffer;
-
+            
             // Create higher quality audio pipeline
             let outputNode = source;
-
+            
             if (chunk.preserveQuality) {
                 // Create a high-pass filter to remove rumble
                 const highPass = audioContext.createBiquadFilter();
                 highPass.type = "highpass";
                 highPass.frequency.value = 80;    // Cut below 80Hz
-
+                
                 // Create a low-pass filter to remove high-frequency noise
                 const lowPass = audioContext.createBiquadFilter();
                 lowPass.type = "lowpass";
                 lowPass.frequency.value = 12000;  // Cut above 12kHz
-
-                // Add vocal clarity filter - improved for speech intelligibility
-                const clarityEQ = audioContext.createBiquadFilter();
-                clarityEQ.type = "peaking";
-                clarityEQ.frequency.value = 2500; // Focus on speech intelligibility
-                clarityEQ.Q.value = 0.8;          // Wider filter for natural sound
-                clarityEQ.gain.value = 3;         // +3dB boost for clarity
-
-                // Add second vocal presence filter
-                const presenceEQ = audioContext.createBiquadFilter();
-                presenceEQ.type = "peaking";
-                presenceEQ.frequency.value = 5000; // Higher vocal presence
-                presenceEQ.Q.value = 1.2;
-                presenceEQ.gain.value = 2;        // +2dB boost
-
-                // Add bass reduction for clearer speech
-                const bassReduction = audioContext.createBiquadFilter();
-                bassReduction.type = "peaking";
-                bassReduction.frequency.value = 250;
-                bassReduction.Q.value = 1.0;
-                bassReduction.gain.value = -2;    // -2dB cut to reduce muddiness
-
+                
                 // Add compressor with speech-optimized settings
                 const compressor = audioContext.createDynamicsCompressor();
-                compressor.threshold.value = -20;  // Lower threshold for more consistent volume
-                compressor.knee.value = 6;         // Gentler knee for more natural compression
-                compressor.ratio.value = 4;        // Higher ratio for more consistent levels
-                compressor.attack.value = 0.005;   // Fast attack to catch transients
-                compressor.release.value = 0.15;   // Short release for speech
-
-                // Master gain with slight boost
+                compressor.threshold.value = -24;  // More aggressive compression for clarity
+                compressor.knee.value = 18;        // Sharper knee for better articulation
+                compressor.ratio.value = 3;        // Moderate ratio for natural sound
+                compressor.attack.value = 0.003;   // Faster attack to catch transients
+                compressor.release.value = 0.15;   // Quicker release for better intelligibility
+                
+                // Mid-range boost for voice clarity
+                const clarityEQ = audioContext.createBiquadFilter();
+                clarityEQ.type = "peaking";        
+                clarityEQ.frequency.value = 2800;  // Focus on speech intelligibility range  
+                clarityEQ.Q.value = 1.0;           // Wider width for natural sound
+                clarityEQ.gain.value = 4;          // +4dB boost for clarity
+                
+                // Presence boost
+                const presenceEQ = audioContext.createBiquadFilter();
+                presenceEQ.type = "peaking";
+                presenceEQ.frequency.value = 5000; // Add presence
+                presenceEQ.Q.value = 1.5;
+                presenceEQ.gain.value = 2;         // +2dB boost
+                
+                // Master gain
                 const gainNode = audioContext.createGain();
-                gainNode.gain.value = 1.1;        // Slight volume boost
-
-                // Connect through enhanced pipeline for clearest speech
+                gainNode.gain.value = 1.0;         // Full volume
+                
+                // Connect through our enhanced pipeline
                 source.connect(highPass);
-                highPass.connect(bassReduction);
-                bassReduction.connect(clarityEQ);
+                highPass.connect(clarityEQ);
                 clarityEQ.connect(presenceEQ);
                 presenceEQ.connect(lowPass);
                 lowPass.connect(compressor);
                 compressor.connect(gainNode);
                 outputNode = gainNode;
             }
-
+            
             // Connect to destination
             outputNode.connect(audioContext.destination);
-
+            
             // When playback ends, process next chunk
             source.onended = processAudioQueue;
-
+            
             // Start playing with slight delay to prevent clicks
             source.start(audioContext.currentTime + 0.01);
-
-            // Visualize the audio
-
-    /**
-     * Request server to reconnect the AI WebSocket
-     */
-    function requestReconnection() {
-        if (!socket || socket.readyState !== WebSocket.OPEN) {
-            logStatus('Cannot reconnect: WebSocket not connected');
-            return false;
-        }
-
-        logStatus('Requesting reconnection to the AI...');
-        socket.send(JSON.stringify({
-            type: 'command',
-            command: 'reconnect'
-        }));
-        
-        return true;
-    }
-    
-    /**
-     * Add a recovery button to the UI for manual reconnection
-     */
-    function addRecoveryButton() {
-        // Check if button already exists
-        if (document.getElementById('recovery-button')) {
-            return;
-        }
-        
-        const controlsContainer = document.querySelector('.controls');
-        if (!controlsContainer) return;
-        
-        const recoveryButton = document.createElement('button');
-        recoveryButton.id = 'recovery-button';
-        recoveryButton.className = 'secondary-button';
-        recoveryButton.textContent = 'Reconnect Audio';
-        recoveryButton.addEventListener('click', function() {
-            // Try to reconnect the audio pipeline
-            logStatus('Manual audio reconnection requested');
             
-            if (isRunning) {
-                // Try to request server reconnection
-                if (requestReconnection()) {
-                    logStatus('Reconnection request sent');
-                } else {
-                    // If server connection is down, try to restart the audio context
-                    if (audioContext) {
-                        audioContext.close().then(() => {
-                            audioContext = new AudioContext({ sampleRate: sampleRate });
-                            addAudioContextStateListener();
-                            audioContext.resume().then(() => {
-                                logStatus('Audio context restarted');
-                            });
-                        }).catch(err => {
-                            logStatus('Failed to restart audio: ' + err.message);
-                        });
-                    }
-                }
-            } else {
-                logStatus('Cannot reconnect when not running');
-            }
-        });
-        
-        // Insert before the stop button
-        controlsContainer.insertBefore(recoveryButton, stopButton);
-    }
-    
-    /**
-     * Add audio context state listener for debugging
-     */
-    function addAudioContextStateListener() {
-        if (audioContext) {
-            audioContext.onstatechange = function() {
-                console.log('Audio context state changed to:', audioContext.state);
-                logStatus(`Audio state: ${audioContext.state}`);
-                
-                // If it becomes suspended, try to resume it automatically
-                if (audioContext.state === 'suspended' && isRunning) {
-                    audioContext.resume().then(() => {
-                        logStatus('Audio context resumed automatically');
-                    }).catch(err => {
-                        logStatus('Failed to auto-resume: ' + err.message);
-                    });
-                }
-            };
-        }
-    }
-
+            // Visualize the audio
             if (audioVisualizerInstance) {
                 const visualData = new Float32Array(chunk.frameCount);
                 for (let i = 0; i < chunk.frameCount; i++) {
@@ -822,16 +852,16 @@ async function initializeAudioDevices() {
                 }
                 audioVisualizerInstance.updateOutputData(visualData);
             }
-
+            
         } catch (error) {
             console.error('Error playing audio chunk:', error);
             // Continue with queue even if one chunk fails
-            processAudioQueue();
+            setTimeout(processAudioQueue, 50); // Small delay before trying next chunk
         }
     }
 
     /**
-     * Set up microphone access
+     * Set up microphone access with robust error handling
      */
     async function setupMicrophone() {
         try {
@@ -864,7 +894,7 @@ async function initializeAudioDevices() {
             } catch (deviceError) {
                 console.warn('Failed to use selected device, falling back to default:', deviceError);
                 logStatus('Falling back to default microphone');
-                
+
                 // Fall back to any available microphone
                 const fallbackConstraints = { audio: true };
                 mediaStream = await navigator.mediaDevices.getUserMedia(fallbackConstraints);
@@ -885,9 +915,6 @@ async function initializeAudioDevices() {
 
             // Set up audio processing
             audioProcessor.onaudioprocess = processAudio;
-            
-            // Add audio context state listener
-            addAudioContextStateListener();
 
             logStatus('Microphone connected successfully');
 
@@ -1000,6 +1027,24 @@ async function initializeAudioDevices() {
     }
 
     /**
+     * Request server to reconnect the AI WebSocket
+     */
+    function requestReconnection() {
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+            logStatus('Cannot reconnect: WebSocket not connected');
+            return false;
+        }
+
+        logStatus('Requesting reconnection to the AI...');
+        socket.send(JSON.stringify({
+            type: 'command',
+            command: 'reconnect'
+        }));
+
+        return true;
+    }
+
+    /**
      * Update status display
      */
     function updateStatus(status) {
@@ -1052,48 +1097,3 @@ async function initializeAudioDevices() {
         }
     }
 });
-
-/**
- * Request server to reconnect the AI WebSocket
- */
-function requestReconnection() {
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-        logStatus('Cannot reconnect: WebSocket not connected');
-        return false;
-    }
-
-    logStatus('Requesting reconnection to the AI...');
-    socket.send(JSON.stringify({
-        type: 'command',
-        command: 'reconnect'
-    }));
-    
-    return true;
-}
-
-/**
- * Handle socket close event with reconnection logic
- */
-function handleSocketClose(event) {
-    console.log('WebSocket closed:', event);
-    isConnected = false;
-    logStatus(`WebSocket closed: ${event.reason || 'Connection closed'}`);
-    
-    updateConnectionStatus('Disconnected');
-    
-    // If it's an abnormal closure and we're still running, try to reconnect the browser WebSocket
-    if (event.code !== 1000 && isRunning) {
-        logStatus('Attempting to reconnect browser WebSocket...');
-        setTimeout(function() {
-            if (isRunning && sessionId) {
-                connectWebSocket();
-            }
-        }, 2000); // Wait 2 seconds before reconnecting
-    } else if (!isRunning) {
-        logStatus('Session stopped');
-    }
-}
-
-// Make sure to update your socket event handler to use the new close handler
-// Add this to your connectWebSocket function:
-// socket.onclose = handleSocketClose;
