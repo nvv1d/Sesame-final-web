@@ -63,9 +63,13 @@ const AUDIO_SETTINGS = {
         
         // Buffer management for smoother playback
         bufferManagement: {
-            initialBufferSize: 2,   // Initial buffer size (audio chunks)
-            dynamicBuffering: true, // Enable dynamic buffer adjustment
-            maxBufferSize: 4,       // Maximum buffer size during poor network
+            initialBufferSize: 2,      // Initial buffer size (audio chunks)
+            dynamicBuffering: true,    // Enable dynamic buffer adjustment
+            maxBufferSize: 4,          // Maximum buffer size during poor network
+            adaptiveThreshold: 150,    // Network jitter threshold in ms to trigger buffer increase
+            jitterWindow: 5,           // Number of packets to measure jitter over
+            minBufferDrainTime: 10,    // Minimum ms to wait between buffer drains
+            networkQualityInterval: 2000, // How often (ms) to reassess network quality
         },
         
         masterGain: 1.05            // Slight boost (5%) for better audibility
