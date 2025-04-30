@@ -48,14 +48,14 @@ class VoiceChatProxy:
         self.character = character
         self.token_file = token_file
 
-        # Audio settings - improved for better clarity
-        self.client_sample_rate = 16000  # Expected from browser
-        self.server_sample_rate = 24000  # Will be updated from Sesame AI server
-        self.audio_segment_duration = 0.02  # Reduced from 0.03 to 0.02 for better responsiveness
+        # Improved audio settings
+        self.client_sample_rate = 16000
+        self.server_sample_rate = 24000
+        self.audio_segment_duration = 0.04  # Increased from 0.02 to 0.04 for better intelligibility
         
-        # Add a buffer for smoothing audio
+        # Enhanced buffer for smoother audio
         self.audio_buffer = []
-        self.max_buffer_length = 5  # Maximum number of chunks to buffer
+        self.max_buffer_length = 8  # Increased from 5 to 8 for smoother playback
 
         # SesameAI client
         self.api_client = SesameAI()
@@ -167,15 +167,15 @@ class VoiceChatProxy:
 
         while self.running:
             try:
-                # Get audio chunk from WebSocket buffer with a shorter timeout
+                # Get audio chunk from WebSocket buffer with a longer timeout
                 if self.ws:
-                    audio_chunk = self.ws.get_next_audio_chunk(timeout=0.05)  # Shorter timeout
+                    audio_chunk = self.ws.get_next_audio_chunk(timeout=0.1)  # Increased from 0.05 to 0.1
                     if audio_chunk and self.browser_ws and self.client_connected:
-                        # Add minimal buffering to reduce stutter without adding much latency
+                        # Add to buffer for smoother playback
                         self.audio_buffer.append(audio_chunk)
                         
-                        # Process the buffer when it reaches a certain size or after a timeout
-                        if len(self.audio_buffer) >= 2:  # Process after collecting 2 chunks
+                        # Process the buffer when it reaches a certain size
+                        if len(self.audio_buffer) >= 4:  # Increased from 2 to 4 chunks
                             # Combine audio chunks for smoother playback
                             combined_chunk = b''.join(self.audio_buffer)
                             self.audio_buffer = []  # Clear buffer
