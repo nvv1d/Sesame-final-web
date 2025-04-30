@@ -107,8 +107,16 @@ document.addEventListener('DOMContentLoaded', function() {
             defaultOutputOption.text = 'Default Speaker';
             outputDeviceSelect.appendChild(defaultOutputOption);
 
+            // Remove "Loading devices..." message right away
+            inputDeviceSelect.querySelector('option[disabled]')?.remove();
+            outputDeviceSelect.querySelector('option[disabled]')?.remove();
+
             // Try to get permissions with a timeout
             try {
+                // First update UI to show we're past the loading state even if permission fails
+                inputDeviceSelect.disabled = false;
+                outputDeviceSelect.disabled = false;
+                
                 // Request permissions to get device list - with timeout
                 const permissionPromise = navigator.mediaDevices.getUserMedia({ audio: true })
                     .then(stream => {
@@ -141,6 +149,11 @@ document.addEventListener('DOMContentLoaded', function() {
 
                 // Add input devices if available
                 if (inputDevices.length > 0) {
+                    // Clear any previous options except default
+                    while (inputDeviceSelect.children.length > 1) {
+                        inputDeviceSelect.removeChild(inputDeviceSelect.lastChild);
+                    }
+                    
                     inputDevices.forEach(device => {
                         const option = document.createElement('option');
                         option.value = device.deviceId;
@@ -151,6 +164,11 @@ document.addEventListener('DOMContentLoaded', function() {
 
                 // Add output devices if available
                 if (outputDevices.length > 0) {
+                    // Clear any previous options except default
+                    while (outputDeviceSelect.children.length > 1) {
+                        outputDeviceSelect.removeChild(outputDeviceSelect.lastChild);
+                    }
+                    
                     outputDevices.forEach(device => {
                         const option = document.createElement('option');
                         option.value = device.deviceId;
@@ -172,6 +190,10 @@ document.addEventListener('DOMContentLoaded', function() {
         } catch (error) {
             console.error('Error initializing audio devices:', error);
             logStatus(`Error: Using default devices. ${error.message}`);
+            
+            // Make sure we still enable selects even on error
+            inputDeviceSelect.disabled = false;
+            outputDeviceSelect.disabled = false;
             
             // Don't throw - just use default devices instead
             startButton.disabled = false;
