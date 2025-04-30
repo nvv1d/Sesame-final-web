@@ -1,4 +1,3 @@
-
 import os
 import json
 import base64
@@ -59,10 +58,14 @@ class VoiceChatProxy:
         self.max_buffer_length = 8  # Increased from 5 to 8 for smoother playback
 
         # SesameAI client
-        self.api_client = SesameAI()
-        self.token_manager = TokenManager(self.api_client, token_file=self.token_file)
-        self.id_token = None
-        self.ws = None
+        try:
+            self.api_client = SesameAI()
+            self.token_manager = TokenManager(self.api_client, token_file=self.token_file)
+            self.id_token = None
+            self.ws = None
+        except Exception as e:
+            logger.error(f"Error initializing SesameAI client: {e}", exc_info=True)
+            raise
 
         # Queues for audio data
         self.output_queue = queue.Queue(maxsize=100)  # Audio from AI to browser
@@ -134,22 +137,22 @@ class VoiceChatProxy:
         if not self.running:
             logger.info("Cannot reconnect: session not running")
             return False
-            
+
         logger.info(f"Attempting to reconnect to {self.character}...")
         self.status = f"Reconnecting to {self.character}..."
         self.connection_status = "Reconnecting"
         self.send_status_to_browser()
-        
+
         # Close previous connection if exists
         if self.ws and self.ws.is_connected():
             try:
                 self.ws.disconnect()
             except Exception as e:
                 logger.error(f"Error closing previous connection: {e}")
-        
+
         # Clear audio buffer
         self.audio_buffer = []
-        
+
         # Reconnect with fresh authentication
         try:
             # Re-authenticate to get a fresh token
@@ -159,7 +162,7 @@ class VoiceChatProxy:
                 self.connection_status = "Disconnected"
                 self.send_status_to_browser()
                 return False
-                
+
             # Connect to AI
             return self.connect_to_ai()
         except Exception as e:
