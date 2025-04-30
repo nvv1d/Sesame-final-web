@@ -22,10 +22,10 @@ document.addEventListener('DOMContentLoaded', function() {
     let audioProcessor = null;
     let audioAnalyser = null;
 
-let audioQueue = [];
-let isPlayingFromQueue = false;
-let lastPlayTime = 0;
-const MIN_GAP_BETWEEN_CHUNKS = 50; // milliseconds
+    let audioQueue = [];
+    let isPlayingFromQueue = false;
+    let lastPlayTime = 0;
+    const MIN_GAP_BETWEEN_CHUNKS = 50; // milliseconds
 
     let audioVisualizerInstance = null;
 
@@ -55,45 +55,67 @@ const MIN_GAP_BETWEEN_CHUNKS = 50; // milliseconds
     stopButton.addEventListener('click', stopVoiceChat);
     characterSelect.addEventListener('change', updateCharacterDisplay);
 
-    // Initialize audio devices
-    initializeAudioDevices();
+    // Add audio context resume function to handle suspended state - MOVED OUTSIDE OF INITIALIZATION
+    function ensureAudioContextRunning() {
+        if (audioContext && audioContext.state !== 'running') {
+            audioContext.resume().then(() => {
+                console.log('AudioContext resumed successfully');
+            }).catch(err => {
+                console.error('Failed to resume AudioContext:', err);
+            });
+        }
+    }
+
+    // Call this when handling user interaction - MOVED OUTSIDE OF INITIALIZATION
+    document.addEventListener('click', ensureAudioContextRunning);
+
+    // Initialize audio devices with error handling
+    initializeAudioDevices().catch(err => {
+        console.error('Failed to initialize audio devices:', err);
+        logStatus('Error initializing audio devices. Please check permissions and try again.');
+        // Still enable the start button to allow retry
+        startButton.disabled = false;
+    });
 
     // Initialize character display
     updateCharacterDisplay();
 
     /**
-     * Initialize audio devices
+     * Initialize audio devices with improved error handling
      */
     async function initializeAudioDevices() {
         try {
-            // Request permissions to get device list
-
-// Add audio context resume function to handle suspended state
-function ensureAudioContextRunning() {
-    if (audioContext && audioContext.state !== 'running') {
-        audioContext.resume().then(() => {
-            console.log('AudioContext resumed successfully');
-        }).catch(err => {
-            console.error('Failed to resume AudioContext:', err);
-        });
-    }
-}
-
-// Call this when handling user interaction
-document.addEventListener('click', ensureAudioContextRunning);
-
-            await navigator.mediaDevices.getUserMedia({ audio: true })
+            logStatus('Initializing audio devices...');
+            
+            // Request permissions to get device list - with timeout
+            const permissionPromise = navigator.mediaDevices.getUserMedia({ audio: true })
                 .then(stream => {
-                    // Stop the stream immediately
+                    // Stop the stream immediately after getting permission
                     stream.getTracks().forEach(track => track.stop());
+                    return true;
                 });
-
+                
+            // Add timeout to avoid hanging indefinitely
+            const timeoutPromise = new Promise((_, reject) => {
+                setTimeout(() => reject(new Error('Timeout requesting microphone permission')), 10000);
+            });
+            
+            // Race between permission and timeout
+            await Promise.race([permissionPromise, timeoutPromise]);
+            
             // Get device list
             const devices = await navigator.mediaDevices.enumerateDevices();
 
             // Populate inputs and outputs
             const inputDevices = devices.filter(device => device.kind === 'audioinput');
             const outputDevices = devices.filter(device => device.kind === 'audiooutput');
+
+            // Log device counts for debugging
+            console.log(`Found ${inputDevices.length} input devices and ${outputDevices.length} output devices`);
+            
+            if (inputDevices.length === 0) {
+                logStatus('Warning: No microphone devices detected');
+            }
 
             // Clear select options
             inputDeviceSelect.innerHTML = '';
@@ -127,9 +149,13 @@ document.addEventListener('click', ensureAudioContextRunning);
                 outputDeviceSelect.appendChild(option);
             });
 
+            logStatus('Audio devices loaded successfully');
+
         } catch (error) {
             console.error('Error initializing audio devices:', error);
-            logStatus('Error: Could not access audio devices. Please check permissions.');
+            logStatus(`Error: Could not access audio devices. ${error.message}`);
+            // Re-throw to be handled by the caller
+            throw error;
         }
     }
 
@@ -185,6 +211,11 @@ document.addEventListener('click', ensureAudioContextRunning);
 
             // Initialize audio context
             audioContext = new AudioContext({ sampleRate: sampleRate });
+            
+            // Ensure audio context is running
+            if (audioContext.state !== 'running') {
+                await audioContext.resume();
+            }
 
             // Set up microphone access
             await setupMicrophone();
@@ -618,60 +649,6 @@ document.addEventListener('click', ensureAudioContextRunning);
             processAudioQueue();
         }
     }
-                compressor.threshold.value = -24;  // More aggressive compression for clarity
-                compressor.knee.value = 18;        // Sharper knee for better articulation
-                compressor.ratio.value = 3;        // Moderate ratio for natural sound
-                compressor.attack.value = 0.003;   // Faster attack to catch transients
-                compressor.release.value = 0.15;   // Quicker release for better intelligibility
-                
-                // Mid-range boost for voice clarity
-                const clarityEQ = audioContext.createBiquadFilter();
-                clarityEQ.type = "peaking";        
-                clarityEQ.frequency.value = 2800;  // Focus on speech intelligibility range  
-                clarityEQ.Q.value = 1.0;           // Wider width for natural sound
-                clarityEQ.gain.value = 4;          // +4dB boost for clarity
-                
-                // Presence boost
-                const presenceEQ = audioContext.createBiquadFilter();
-                presenceEQ.type = "peaking";
-                presenceEQ.frequency.value = 5000; // Add presence
-                presenceEQ.Q.value = 1.5;
-                presenceEQ.gain.value = 2;         // +2dB boost
-                
-                // Create a high-pass filter to remove rumble
-                const highPass = audioContext.createBiquadFilter();
-                highPass.type = "highpass";
-                highPass.frequency.value = 100;    // Cut below 100Hz
-                
-                // Create a low-pass filter to remove hiss
-                const lowPass = audioContext.createBiquadFilter();
-                lowPass.type = "lowpass";
-                lowPass.frequency.value = 10000;   // Cut above 10kHz
-                
-                // Master gain
-                const gainNode = audioContext.createGain();
-                gainNode.gain.value = 1.0;         // Full volume
-                
-                // Connect through our enhanced pipeline
-                source.connect(highPass);
-                highPass.connect(clarityEQ);
-                clarityEQ.connect(presenceEQ);
-                presenceEQ.connect(lowPass);
-                lowPass.connect(compressor);
-                compressor.connect(gainNode);
-                outputNode = gainNode;
-            }
-            
-            // Connect to destination with crossfading to prevent pops/clicks
-            outputNode.connect(audioContext.destination);
-            
-            // Start playing with a slight delay to prevent buffer underruns
-            source.start(audioContext.currentTime + 0.01);
-            
-        } catch (error) {
-            console.error('Error playing audio:', error);
-        }
-    }
 
     /**
      * Set up microphone access
@@ -693,8 +670,13 @@ document.addEventListener('click', ensureAudioContextRunning);
                 }
             };
 
-            // Get media stream
-            mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+            // Get media stream with timeout
+            const streamPromise = navigator.mediaDevices.getUserMedia(constraints);
+            const timeoutPromise = new Promise((_, reject) => {
+                setTimeout(() => reject(new Error('Timeout getting microphone stream')), 10000);
+            });
+            
+            mediaStream = await Promise.race([streamPromise, timeoutPromise]);
 
             // Create audio source
             audioInput = audioContext.createMediaStreamSource(mediaStream);
@@ -716,7 +698,7 @@ document.addEventListener('click', ensureAudioContextRunning);
 
         } catch (error) {
             console.error('Error setting up microphone:', error);
-            throw new Error('Could not access microphone');
+            throw new Error('Could not access microphone: ' + error.message);
         }
     }
 
