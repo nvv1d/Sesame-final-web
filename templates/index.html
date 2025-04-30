@@ -17,11 +17,11 @@
                 <span id="status-text">Disconnected</span>
             </div>
         </header>
-        
+
         <div class="main-content">
             <div class="setup-panel">
                 <h2>Setup</h2>
-                
+
                 <div class="form-group">
                     <label for="character-select">Character</label>
                     <select id="character-select">
@@ -29,21 +29,21 @@
                         <option value="Maya">Maya</option>
                     </select>
                 </div>
-                
+
                 <div class="form-group">
                     <label for="input-device">Microphone</label>
                     <select id="input-device">
-                        <option value="" disabled selected>Loading devices...</option>
+                        <option value="">Default Microphone</option>
                     </select>
                 </div>
-                
+
                 <div class="form-group">
                     <label for="output-device">Speaker</label>
                     <select id="output-device">
-                        <option value="" disabled selected>Loading devices...</option>
+                        <option value="">Default Speaker</option>
                     </select>
                 </div>
-                
+
                 <div class="control-buttons">
                     <button id="start-button" class="button primary">
                         <i data-feather="mic"></i> Start Chat
@@ -53,7 +53,7 @@
                     </button>
                 </div>
             </div>
-            
+
             <div class="visualization-panel">
                 <div class="character-display">
                     <div class="character-avatar">
@@ -64,28 +64,100 @@
                         <div id="character-name">Miles</div>
                     </div>
                 </div>
-                
+
                 <div class="audio-visualization">
                     <h3>Audio Activity</h3>
                     <div class="visualization-container">
                         <canvas id="audio-visualizer"></canvas>
                     </div>
                 </div>
-                
+
                 <div class="status-messages">
                     <h3>Status</h3>
                     <div id="status-messages-container"></div>
                 </div>
             </div>
         </div>
-        
+
         <footer>
             <p>Unofficial Sesame AI Voice Chat | NVV1D | <span id="connection-status">Disconnected</span></p>
         </footer>
     </div>
-    
+
+    <!-- JavaScript - ensure proper loading order -->
+    <script src="{{ url_for('static', filename='js/audio-settings.js') }}"></script>
+    <script>
+        // Safety check - ensure AUDIO_SETTINGS is available before loading main.js
+        if (typeof AUDIO_SETTINGS === 'undefined') {
+            console.error('AUDIO_SETTINGS not available - creating fallback');
+            window.AUDIO_SETTINGS = {
+                sampleRate: 16000,
+                bufferSize: 512,
+                minGapBetweenChunks: 20,
+                maxQueueSize: 10,
+                audioEnhancements: {
+                    enableHighPassFilter: true,
+                    highPassFrequency: 70,
+                    enableLowPassFilter: true,
+                    lowPassFrequency: 14000,
+                    enableCompressor: true,
+                    masterGain: 1.0
+                }
+            };
+        }
+    </script>
     <script src="{{ url_for('static', filename='js/audio-visualizer.js') }}"></script>
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+
+    <!-- Add performance mode selector -->
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Create performance mode dropdown if AUDIO_SETTINGS is available
+            if (window.AUDIO_SETTINGS && AUDIO_SETTINGS.adjustForPerformance) {
+                const controlsContainer = document.querySelector('.controls');
+                if (controlsContainer) {
+                    const performanceSelector = document.createElement('select');
+                    performanceSelector.id = 'performance-mode';
+                    performanceSelector.className = 'secondary-select';
+
+                    const options = [
+                        {value: 'high', text: 'High Performance (Low Latency)'},
+                        {value: 'medium', text: 'Balanced (Default)'},
+                        {value: 'low', text: 'Low Performance (More Stable)'}
+                    ];
+
+                    options.forEach(opt => {
+                        const option = document.createElement('option');
+                        option.value = opt.value;
+                        option.text = opt.text;
+                        if (opt.value === 'medium') option.selected = true;
+                        performanceSelector.appendChild(option);
+                    });
+
+                    performanceSelector.addEventListener('change', function() {
+                        AUDIO_SETTINGS.adjustForPerformance(this.value);
+                        console.log(`Audio performance set to: ${this.value}`);
+                    });
+
+                    // Add a label
+                    const label = document.createElement('label');
+                    label.setAttribute('for', 'performance-mode');
+                    label.textContent = 'Audio Quality:';
+                    label.className = 'settings-label';
+
+                    // Add to page
+                    const wrapper = document.createElement('div');
+                    wrapper.className = 'setting-group';
+                    wrapper.appendChild(label);
+                    wrapper.appendChild(performanceSelector);
+
+                    // Insert after character select
+                    const characterGroup = document.querySelector('#character-select').parentNode;
+                    controlsContainer.insertBefore(wrapper, characterGroup.nextSibling);
+                }
+            }
+        });
+    </script>
     <script src="https://cdn.jsdelivr.net/npm/feather-icons/dist/feather.min.js"></script>
     <script>
         // Initialize Feather icons
