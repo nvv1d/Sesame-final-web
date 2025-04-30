@@ -52,7 +52,7 @@ class VoiceChatProxy:
         self.client_sample_rate = 16000
         self.server_sample_rate = 24000
         self.audio_segment_duration = 0.04  # Increased from 0.02 to 0.04 for better intelligibility
-        
+
         # Enhanced buffer for smoother audio
         self.audio_buffer = []
         self.max_buffer_length = 8  # Increased from 5 to 8 for smoother playback
@@ -118,6 +118,9 @@ class VoiceChatProxy:
         self.connection_status = "Disconnected"
         self.status = f"Disconnected from {self.character}"
 
+        # Reset audio buffer to prevent playback of stale audio on reconnection
+        self.audio_buffer = []
+
         # Send status update to browser
         self.send_status_to_browser()
 
@@ -173,13 +176,13 @@ class VoiceChatProxy:
                     if audio_chunk and self.browser_ws and self.client_connected:
                         # Add to buffer for smoother playback
                         self.audio_buffer.append(audio_chunk)
-                        
+
                         # Process the buffer when it reaches a certain size
                         if len(self.audio_buffer) >= 4:  # Increased from 2 to 4 chunks
                             # Combine audio chunks for smoother playback
                             combined_chunk = b''.join(self.audio_buffer)
                             self.audio_buffer = []  # Clear buffer
-                            
+
                             # Convert to base64 for sending to browser
                             audio_base64 = base64.b64encode(combined_chunk).decode('utf-8')
 
@@ -207,9 +210,50 @@ class VoiceChatProxy:
                         if self.audio_buffer and len(self.audio_buffer) > 0 and self.browser_ws and self.client_connected:
                             combined_chunk = b''.join(self.audio_buffer)
                             self.audio_buffer = []
-                            
+
                             audio_base64 = base64.b64encode(combined_chunk).decode('utf-8')
                             message = {
+
+    def reconnect_to_ai(self):
+        """Attempt to reconnect to Sesame AI WebSocket"""
+        if not self.running:
+            logger.info("Cannot reconnect: session not running")
+            return False
+            
+        logger.info(f"Attempting to reconnect to {self.character}...")
+        self.status = f"Reconnecting to {self.character}..."
+        self.connection_status = "Reconnecting"
+        self.send_status_to_browser()
+        
+        # Close previous connection if exists
+        if self.ws and self.ws.is_connected():
+            try:
+                self.ws.disconnect()
+            except Exception as e:
+                logger.error(f"Error closing previous connection: {e}")
+        
+        # Clear audio buffer
+        self.audio_buffer = []
+        
+        # Reconnect with fresh authentication
+        try:
+            # Re-authenticate to get a fresh token
+            if not self.authenticate():
+                logger.error("Reconnection failed: Authentication error")
+                self.status = "Reconnection failed: Authentication error"
+                self.connection_status = "Disconnected"
+                self.send_status_to_browser()
+                return False
+                
+            # Connect to AI
+            return self.connect_to_ai()
+        except Exception as e:
+            logger.error(f"Reconnection failed: {e}", exc_info=True)
+            self.status = f"Reconnection failed: {str(e)}"
+            self.connection_status = "Disconnected"
+            self.send_status_to_browser()
+            return False
+
                                 'type': 'audio',
                                 'data': audio_base64,
                                 'sampleRate': self.server_sample_rate,
@@ -218,21 +262,21 @@ class VoiceChatProxy:
                                 'channels': 1,
                                 'bitDepth': 16
                             }
-                            
+
                             try:
                                 self.browser_ws.send(json.dumps(message))
                             except Exception as e:
                                 logger.error(f"Error sending buffered audio: {e}")
-                        
+
                         # Short sleep to prevent CPU hogging
                         time.sleep(0.01)
                 else:
                     time.sleep(0.05)
-                    
+
                 # Prevent buffer from growing too large during silence
                 if len(self.audio_buffer) > self.max_buffer_length:
                     self.audio_buffer = self.audio_buffer[-self.max_buffer_length:]
-                    
+
             except Exception as e:
                 if self.running:
                     logger.error(f"Error processing audio: {e}", exc_info=True)
@@ -399,6 +443,11 @@ def ws_chat(ws, session_id):
     # Send initial status
     proxy.send_status_to_browser()
 
+    # If proxy is running but AI is not connected, try to reconnect
+    if proxy.running and (not proxy.ws or not proxy.ws.is_connected()):
+        logger.info("Session exists but AI connection is down. Attempting reconnection.")
+        proxy.reconnect_to_ai()
+
     # Process messages from browser
     try:
         while True:
@@ -421,6 +470,13 @@ def ws_chat(ws, session_id):
                     command = data.get('command')
                     if command == 'status':
                         proxy.send_status_to_browser()
+                    elif command == 'reconnect':
+                        # Handle explicit reconnection request
+                        success = proxy.reconnect_to_ai()
+                        ws.send(json.dumps({
+                            'type': 'reconnect_result',
+                            'success': success
+                        }))
             except json.JSONDecodeError:
                 logger.warning(f"Received invalid JSON: {message}")
             except Exception as e:
