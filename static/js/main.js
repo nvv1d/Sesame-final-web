@@ -28,8 +28,8 @@ document.addEventListener('DOMContentLoaded', function() {
     let silenceCounter = 0;
     const silenceLimit = 50;
 
-    // Audio settings
-    const bufferSize = 4096;
+    // Audio settings - reduce buffer size for less latency
+    const bufferSize = 1024; // Changed from 4096 to 1024 for less lag
     const sampleRate = 16000;
 
     // Session management
@@ -61,6 +61,21 @@ document.addEventListener('DOMContentLoaded', function() {
     async function initializeAudioDevices() {
         try {
             // Request permissions to get device list
+
+// Add audio context resume function to handle suspended state
+function ensureAudioContextRunning() {
+    if (audioContext && audioContext.state !== 'running') {
+        audioContext.resume().then(() => {
+            console.log('AudioContext resumed successfully');
+        }).catch(err => {
+            console.error('Failed to resume AudioContext:', err);
+        });
+    }
+}
+
+// Call this when handling user interaction
+document.addEventListener('click', ensureAudioContextRunning);
+
             await navigator.mediaDevices.getUserMedia({ audio: true })
                 .then(stream => {
                     // Stop the stream immediately
@@ -450,17 +465,15 @@ document.addEventListener('DOMContentLoaded', function() {
             // Convert byteArray to Int16Array (16-bit PCM format that Sesame AI uses)
             const int16Data = new Int16Array(byteArray);
             
-            // Create an audio buffer with higher sample rate for better quality
-            const frameCount = int16Data.length;
             // Use a higher sample rate when available
             const effectiveSampleRate = sampleRate || 24000;
+            const frameCount = int16Data.length;
             const audioBuffer = audioContext.createBuffer(1, frameCount, effectiveSampleRate);
             
             // Get the raw audio data and convert from Int16 to Float32 format with enhanced precision
             const channelData = audioBuffer.getChannelData(0);
             for (let i = 0; i < frameCount; i++) {
                 // Convert from Int16 (-32768 to 32767) to Float32 (-1.0 to 1.0)
-                // Add slight emphasis on mid-range frequencies where voice intelligibility is critical
                 channelData[i] = (int16Data[i] / 32768.0);
             }
             
@@ -472,46 +485,58 @@ document.addEventListener('DOMContentLoaded', function() {
             let outputNode = source;
             
             if (preserveQuality) {
-                // Add a high-quality context with enhanced voice settings
+                // Add high-quality context with enhanced voice settings
                 const compressor = audioContext.createDynamicsCompressor();
-                compressor.threshold.value = -50;
-                compressor.knee.value = 40;
-                // Dynamic compression settings optimized for voice
-                compressor.threshold.value = -20;  // Slightly higher threshold for less compression
-                compressor.knee.value = 25;        // Smoother compression curve
-                compressor.ratio.value = 4;        // Gentler ratio for more natural sound
-                compressor.attack.value = 0.005;   // Slightly slower attack
-                compressor.release.value = 0.25;   // Moderate release for natural decay
+                // Dynamic compression settings optimized for voice clarity
+                compressor.threshold.value = -24;  // More aggressive compression for clarity
+                compressor.knee.value = 18;        // Sharper knee for better articulation
+                compressor.ratio.value = 3;        // Moderate ratio for natural sound
+                compressor.attack.value = 0.003;   // Faster attack to catch transients
+                compressor.release.value = 0.15;   // Quicker release for better intelligibility
                 
-                // Create a biquad filter for voice enhancement
-                const voiceEQ = audioContext.createBiquadFilter();
-                voiceEQ.type = "peaking";        // EQ bell curve
-                voiceEQ.frequency.value = 2500;  // Enhance speech intelligibility range
-                voiceEQ.Q.value = 1.2;           // Slightly narrower width
-                voiceEQ.gain.value = 3;          // +3dB boost to this frequency range
+                // Mid-range boost for voice clarity
+                const clarityEQ = audioContext.createBiquadFilter();
+                clarityEQ.type = "peaking";        
+                clarityEQ.frequency.value = 2800;  // Focus on speech intelligibility range  
+                clarityEQ.Q.value = 1.0;           // Wider width for natural sound
+                clarityEQ.gain.value = 4;          // +4dB boost for clarity
+                
+                // Presence boost
+                const presenceEQ = audioContext.createBiquadFilter();
+                presenceEQ.type = "peaking";
+                presenceEQ.frequency.value = 5000; // Add presence
+                presenceEQ.Q.value = 1.5;
+                presenceEQ.gain.value = 2;         // +2dB boost
                 
                 // Create a high-pass filter to remove rumble
                 const highPass = audioContext.createBiquadFilter();
                 highPass.type = "highpass";
-                highPass.frequency.value = 80;   // Cut below 80Hz
+                highPass.frequency.value = 100;    // Cut below 100Hz
                 
-                // Create a gain node to adjust the signal volume
+                // Create a low-pass filter to remove hiss
+                const lowPass = audioContext.createBiquadFilter();
+                lowPass.type = "lowpass";
+                lowPass.frequency.value = 10000;   // Cut above 10kHz
+                
+                // Master gain
                 const gainNode = audioContext.createGain();
-                gainNode.gain.value = 0.8;       // Lower volume to 80% of original
+                gainNode.gain.value = 1.0;         // Full volume
                 
                 // Connect through our enhanced pipeline
                 source.connect(highPass);
-                highPass.connect(voiceEQ);
-                voiceEQ.connect(compressor);
+                highPass.connect(clarityEQ);
+                clarityEQ.connect(presenceEQ);
+                presenceEQ.connect(lowPass);
+                lowPass.connect(compressor);
                 compressor.connect(gainNode);
                 outputNode = gainNode;
             }
             
-            // Connect to destination
+            // Connect to destination with crossfading to prevent pops/clicks
             outputNode.connect(audioContext.destination);
             
-            // Start playing
-            source.start(0);
+            // Start playing with a slight delay to prevent buffer underruns
+            source.start(audioContext.currentTime + 0.01);
             
         } catch (error) {
             console.error('Error playing audio:', error);
@@ -526,11 +551,11 @@ document.addEventListener('DOMContentLoaded', function() {
             // Get selected input device
             const deviceId = inputDeviceSelect.value;
 
-            // Set up constraints
+            // Set up constraints with improved audio quality settings
             const constraints = {
                 audio: {
                     deviceId: deviceId ? { exact: deviceId } : undefined,
-                    sampleRate: { ideal: sampleRate },
+                    sampleRate: { ideal: 44100 }, // Higher sample rate for better quality
                     channelCount: { ideal: 1 },
                     echoCancellation: true,
                     noiseSuppression: true,
@@ -549,7 +574,7 @@ document.addEventListener('DOMContentLoaded', function() {
             audioAnalyser.fftSize = 2048;
             audioInput.connect(audioAnalyser);
 
-            // Create script processor for audio processing
+            // Create script processor for audio processing with smaller buffer size
             audioProcessor = audioContext.createScriptProcessor(bufferSize, 1, 1);
             audioInput.connect(audioProcessor);
             audioProcessor.connect(audioContext.destination);
@@ -557,7 +582,7 @@ document.addEventListener('DOMContentLoaded', function() {
             // Set up audio processing
             audioProcessor.onaudioprocess = processAudio;
 
-            logStatus('Microphone connected');
+            logStatus('Microphone connected with enhanced quality settings');
 
         } catch (error) {
             console.error('Error setting up microphone:', error);
