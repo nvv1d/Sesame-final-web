@@ -83,123 +83,108 @@ document.addEventListener('DOMContentLoaded', function() {
     // Initialize character display
     updateCharacterDisplay();
 
-    /**
-     * Initialize audio devices with improved error handling
-     */
-    async function initializeAudioDevices() {
+/**
+ * Initialize audio devices with improved error handling
+ */
+async function initializeAudioDevices() {
+    try {
+        logStatus('Initializing audio devices...');
+
+        // Clear select options completely
+        inputDeviceSelect.innerHTML = '';
+        outputDeviceSelect.innerHTML = '';
+
+        // Add default option for input
+        const defaultInputOption = document.createElement('option');
+        defaultInputOption.value = '';
+        defaultInputOption.text = 'Default Microphone';
+        inputDeviceSelect.appendChild(defaultInputOption);
+
+        // Add default option for output
+        const defaultOutputOption = document.createElement('option');
+        defaultOutputOption.value = '';
+        defaultOutputOption.text = 'Default Speaker';
+        outputDeviceSelect.appendChild(defaultOutputOption);
+
+        // Enable the selects right away to avoid appearing stuck
+        inputDeviceSelect.disabled = false;
+        outputDeviceSelect.disabled = false;
+
+        // Try to get permissions with a timeout
         try {
-            logStatus('Initializing audio devices...');
-
-            // Set up default options even before permissions to ensure UI is responsive
-            // Clear select options
-            inputDeviceSelect.innerHTML = '';
-            outputDeviceSelect.innerHTML = '';
-
-            // Add default option for input
-            const defaultInputOption = document.createElement('option');
-            defaultInputOption.value = '';
-            defaultInputOption.text = 'Default Microphone';
-            inputDeviceSelect.appendChild(defaultInputOption);
-
-            // Add default option for output
-            const defaultOutputOption = document.createElement('option');
-            defaultOutputOption.value = '';
-            defaultOutputOption.text = 'Default Speaker';
-            outputDeviceSelect.appendChild(defaultOutputOption);
-
-            // Remove "Loading devices..." message right away
-            inputDeviceSelect.querySelector('option[disabled]')?.remove();
-            outputDeviceSelect.querySelector('option[disabled]')?.remove();
-
-            // Try to get permissions with a timeout
-            try {
-                // First update UI to show we're past the loading state even if permission fails
-                inputDeviceSelect.disabled = false;
-                outputDeviceSelect.disabled = false;
-                
-                // Request permissions to get device list - with timeout
-                const permissionPromise = navigator.mediaDevices.getUserMedia({ audio: true })
-                    .then(stream => {
-                        // Stop the stream immediately after getting permission
-                        stream.getTracks().forEach(track => track.stop());
-                        return true;
-                    });
-
-                // Add timeout to avoid hanging indefinitely
-                const timeoutPromise = new Promise((_, reject) => {
-                    setTimeout(() => reject(new Error('Timeout requesting microphone permission')), 10000);
+            // Request permissions to get device list - with timeout
+            const permissionPromise = navigator.mediaDevices.getUserMedia({ audio: true })
+                .then(stream => {
+                    // Stop the stream immediately after getting permission
+                    stream.getTracks().forEach(track => track.stop());
+                    return true;
                 });
 
-                // Race between permission and timeout
-                await Promise.race([permissionPromise, timeoutPromise]);
+            // Add timeout to avoid hanging indefinitely
+            const timeoutPromise = new Promise((_, reject) => {
+                setTimeout(() => reject(new Error('Timeout requesting microphone permission')), 10000);
+            });
 
-                // Get device list
-                const devices = await navigator.mediaDevices.enumerateDevices();
+            // Race between permission and timeout
+            await Promise.race([permissionPromise, timeoutPromise]);
 
-                // Populate inputs and outputs
-                const inputDevices = devices.filter(device => device.kind === 'audioinput');
-                const outputDevices = devices.filter(device => device.kind === 'audiooutput');
+            // Get device list
+            const devices = await navigator.mediaDevices.enumerateDevices();
 
-                // Log device counts for debugging
-                console.log(`Found ${inputDevices.length} input devices and ${outputDevices.length} output devices`);
+            // Populate inputs and outputs
+            const inputDevices = devices.filter(device => device.kind === 'audioinput');
+            const outputDevices = devices.filter(device => device.kind === 'audiooutput');
 
-                if (inputDevices.length === 0) {
-                    logStatus('Warning: No microphone devices detected, using defaults');
-                }
+            // Log device counts for debugging
+            console.log(`Found ${inputDevices.length} input devices and ${outputDevices.length} output devices`);
 
-                // Add input devices if available
-                if (inputDevices.length > 0) {
-                    // Clear any previous options except default
-                    while (inputDeviceSelect.children.length > 1) {
-                        inputDeviceSelect.removeChild(inputDeviceSelect.lastChild);
-                    }
-                    
-                    inputDevices.forEach(device => {
-                        const option = document.createElement('option');
-                        option.value = device.deviceId;
-                        option.text = device.label || `Microphone ${inputDeviceSelect.children.length}`;
-                        inputDeviceSelect.appendChild(option);
-                    });
-                }
-
-                // Add output devices if available
-                if (outputDevices.length > 0) {
-                    // Clear any previous options except default
-                    while (outputDeviceSelect.children.length > 1) {
-                        outputDeviceSelect.removeChild(outputDeviceSelect.lastChild);
-                    }
-                    
-                    outputDevices.forEach(device => {
-                        const option = document.createElement('option');
-                        option.value = device.deviceId;
-                        option.text = device.label || `Speaker ${outputDeviceSelect.children.length}`;
-                        outputDeviceSelect.appendChild(option);
-                    });
-                }
-
-                logStatus('Audio devices loaded successfully');
-            } catch (permError) {
-                console.warn('Could not get device permissions:', permError);
-                logStatus('Using default audio devices - permission issue');
-                // Continue with default devices only
+            if (inputDevices.length === 0) {
+                logStatus('Warning: No microphone devices detected, using defaults');
             }
 
-            // Enable the start button regardless of device detection
-            startButton.disabled = false;
+            // Add input devices if available
+            if (inputDevices.length > 0) {
+                inputDevices.forEach(device => {
+                    const option = document.createElement('option');
+                    option.value = device.deviceId;
+                    option.text = device.label || `Microphone ${inputDeviceSelect.children.length}`;
+                    inputDeviceSelect.appendChild(option);
+                });
+            }
 
-        } catch (error) {
-            console.error('Error initializing audio devices:', error);
-            logStatus(`Error: Using default devices. ${error.message}`);
-            
-            // Make sure we still enable selects even on error
-            inputDeviceSelect.disabled = false;
-            outputDeviceSelect.disabled = false;
-            
-            // Don't throw - just use default devices instead
-            startButton.disabled = false;
+            // Add output devices if available
+            if (outputDevices.length > 0) {
+                outputDevices.forEach(device => {
+                    const option = document.createElement('option');
+                    option.value = device.deviceId;
+                    option.text = device.label || `Speaker ${outputDeviceSelect.children.length}`;
+                    outputDeviceSelect.appendChild(option);
+                });
+            }
+
+            logStatus('Audio devices loaded successfully');
+        } catch (permError) {
+            console.warn('Could not get device permissions:', permError);
+            logStatus('Using default audio devices - permission issue');
+            // Continue with default devices only
         }
-    }
 
+        // Enable the start button regardless of device detection
+        startButton.disabled = false;
+
+    } catch (error) {
+        console.error('Error initializing audio devices:', error);
+        logStatus(`Error: Using default devices. ${error.message}`);
+        
+        // Make sure we still enable selects even on error
+        inputDeviceSelect.disabled = false;
+        outputDeviceSelect.disabled = false;
+        
+        // Don't throw - just use default devices instead
+        startButton.disabled = false;
+    }
+}
+    
     /**
      * Update character display
      */
