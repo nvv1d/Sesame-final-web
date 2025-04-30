@@ -1,3 +1,4 @@
+
 import os
 import json
 import base64
@@ -128,6 +129,46 @@ class VoiceChatProxy:
         if self.running:
             self.stop()
 
+    def reconnect_to_ai(self):
+        """Attempt to reconnect to Sesame AI WebSocket"""
+        if not self.running:
+            logger.info("Cannot reconnect: session not running")
+            return False
+            
+        logger.info(f"Attempting to reconnect to {self.character}...")
+        self.status = f"Reconnecting to {self.character}..."
+        self.connection_status = "Reconnecting"
+        self.send_status_to_browser()
+        
+        # Close previous connection if exists
+        if self.ws and self.ws.is_connected():
+            try:
+                self.ws.disconnect()
+            except Exception as e:
+                logger.error(f"Error closing previous connection: {e}")
+        
+        # Clear audio buffer
+        self.audio_buffer = []
+        
+        # Reconnect with fresh authentication
+        try:
+            # Re-authenticate to get a fresh token
+            if not self.authenticate():
+                logger.error("Reconnection failed: Authentication error")
+                self.status = "Reconnection failed: Authentication error"
+                self.connection_status = "Disconnected"
+                self.send_status_to_browser()
+                return False
+                
+            # Connect to AI
+            return self.connect_to_ai()
+        except Exception as e:
+            logger.error(f"Reconnection failed: {e}", exc_info=True)
+            self.status = f"Reconnection failed: {str(e)}"
+            self.connection_status = "Disconnected"
+            self.send_status_to_browser()
+            return False
+
     def connect_to_ai(self):
         """Connect to Sesame AI WebSocket"""
         self.status = f"Connecting to {self.character}..."
@@ -213,47 +254,6 @@ class VoiceChatProxy:
 
                             audio_base64 = base64.b64encode(combined_chunk).decode('utf-8')
                             message = {
-
-    def reconnect_to_ai(self):
-        """Attempt to reconnect to Sesame AI WebSocket"""
-        if not self.running:
-            logger.info("Cannot reconnect: session not running")
-            return False
-            
-        logger.info(f"Attempting to reconnect to {self.character}...")
-        self.status = f"Reconnecting to {self.character}..."
-        self.connection_status = "Reconnecting"
-        self.send_status_to_browser()
-        
-        # Close previous connection if exists
-        if self.ws and self.ws.is_connected():
-            try:
-                self.ws.disconnect()
-            except Exception as e:
-                logger.error(f"Error closing previous connection: {e}")
-        
-        # Clear audio buffer
-        self.audio_buffer = []
-        
-        # Reconnect with fresh authentication
-        try:
-            # Re-authenticate to get a fresh token
-            if not self.authenticate():
-                logger.error("Reconnection failed: Authentication error")
-                self.status = "Reconnection failed: Authentication error"
-                self.connection_status = "Disconnected"
-                self.send_status_to_browser()
-                return False
-                
-            # Connect to AI
-            return self.connect_to_ai()
-        except Exception as e:
-            logger.error(f"Reconnection failed: {e}", exc_info=True)
-            self.status = f"Reconnection failed: {str(e)}"
-            self.connection_status = "Disconnected"
-            self.send_status_to_browser()
-            return False
-
                                 'type': 'audio',
                                 'data': audio_base64,
                                 'sampleRate': self.server_sample_rate,
