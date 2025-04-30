@@ -2,14 +2,17 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies for PyAudio
+# Install system dependencies for PyAudio and optimized numeric libraries
 RUN apt-get update && apt-get install -y \
     portaudio19-dev \
     gcc \
+    g++ \
+    libopenblas-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
 COPY requirements.txt .
+# Install with optimized flags for better audio processing performance
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
