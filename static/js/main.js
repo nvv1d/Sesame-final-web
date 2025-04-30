@@ -12,6 +12,9 @@ document.addEventListener('DOMContentLoaded', function() {
     const outputDeviceSelect = document.getElementById('output-device');
     const characterName = document.getElementById('character-name');
     const audioVisualizer = document.getElementById('audio-visualizer');
+    
+    // Add recovery button
+    addRecoveryButton();
 
     // Initialize audio context
     const AudioContext = window.AudioContext || window.webkitAudioContext;
@@ -86,7 +89,7 @@ document.addEventListener('DOMContentLoaded', function() {
     async function initializeAudioDevices() {
         try {
             logStatus('Initializing audio devices...');
-            
+
             // Request permissions to get device list - with timeout
             const permissionPromise = navigator.mediaDevices.getUserMedia({ audio: true })
                 .then(stream => {
@@ -94,15 +97,15 @@ document.addEventListener('DOMContentLoaded', function() {
                     stream.getTracks().forEach(track => track.stop());
                     return true;
                 });
-                
+
             // Add timeout to avoid hanging indefinitely
             const timeoutPromise = new Promise((_, reject) => {
                 setTimeout(() => reject(new Error('Timeout requesting microphone permission')), 10000);
             });
-            
+
             // Race between permission and timeout
             await Promise.race([permissionPromise, timeoutPromise]);
-            
+
             // Get device list
             const devices = await navigator.mediaDevices.enumerateDevices();
 
@@ -112,7 +115,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
             // Log device counts for debugging
             console.log(`Found ${inputDevices.length} input devices and ${outputDevices.length} output devices`);
-            
+
             if (inputDevices.length === 0) {
                 logStatus('Warning: No microphone devices detected');
             }
@@ -211,7 +214,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
             // Initialize audio context
             audioContext = new AudioContext({ sampleRate: sampleRate });
-            
+
             // Ensure audio context is running
             if (audioContext.state !== 'running') {
                 await audioContext.resume();
@@ -390,15 +393,25 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     /**
-     * Handle WebSocket close event
+     * Handle WebSocket close event with reconnection logic
      */
     function handleSocketClose(event) {
         console.log('WebSocket closed:', event);
         isConnected = false;
         logStatus(`WebSocket closed: ${event.reason || 'Connection closed'}`);
-
-        // Stop the voice chat if it's still running
-        if (isRunning) {
+        
+        updateConnectionStatus('Disconnected');
+        
+        // If it's an abnormal closure and we're still running, try to reconnect the browser WebSocket
+        if (event.code !== 1000 && isRunning) {
+            logStatus('Attempting to reconnect browser WebSocket...');
+            setTimeout(function() {
+                if (isRunning && sessionId) {
+                    connectWebSocket();
+                }
+            }, 2000); // Wait 2 seconds before reconnecting
+        } else if (!isRunning) {
+            // Clean stop requested
             stopVoiceChat();
         }
     }
@@ -435,6 +448,22 @@ document.addEventListener('DOMContentLoaded', function() {
 
                 case 'pong':
                     // Ping response, nothing to do
+                    break;
+                    
+                case 'reconnect_result':
+                    if (message.success) {
+                        logStatus('Reconnection successful');
+                        // Try to restart audio context
+                        if (audioContext && audioContext.state !== 'running') {
+                            audioContext.resume().then(() => {
+                                logStatus('Audio context resumed');
+                            }).catch(err => {
+                                logStatus('Failed to resume audio context: ' + err.message);
+                            });
+                        }
+                    } else {
+                        logStatus('Reconnection failed');
+                    }
                     break;
 
                 default:
@@ -498,17 +527,17 @@ document.addEventListener('DOMContentLoaded', function() {
         try {
             // Decode base64 audio data
             const byteArray = base64ToArrayBuffer(audioData);
-            
+
             // Convert byteArray to Int16Array (16-bit PCM format)
             const int16Data = new Int16Array(byteArray);
-            
+
             // Use provided sample rate or default to high quality
             const effectiveSampleRate = sampleRate || 24000;
             const frameCount = int16Data.length;
-            
+
             // Calculate duration of this audio chunk
             const durationMs = (frameCount / effectiveSampleRate) * 1000;
-            
+
             // Create audio processing object
             const audioChunk = {
                 data: int16Data,
@@ -517,15 +546,15 @@ document.addEventListener('DOMContentLoaded', function() {
                 duration: durationMs,
                 preserveQuality: preserveQuality
             };
-            
+
             // Add to queue for sequential playback
             audioQueue.push(audioChunk);
-            
+
             // Start playing if not already
             if (!isPlayingFromQueue) {
                 processAudioQueue();
             }
-            
+
         } catch (error) {
             console.error('Error queuing audio:', error);
         }
@@ -536,10 +565,10 @@ document.addEventListener('DOMContentLoaded', function() {
             isPlayingFromQueue = false;
             return;
         }
-        
+
         isPlayingFromQueue = true;
         const now = Date.now();
-        
+
         // Respect minimum gap between audio chunks
         const timeSinceLastPlay = now - lastPlayTime;
         if (timeSinceLastPlay < MIN_GAP_BETWEEN_CHUNKS && lastPlayTime !== 0) {
@@ -547,61 +576,61 @@ document.addEventListener('DOMContentLoaded', function() {
             setTimeout(processAudioQueue, MIN_GAP_BETWEEN_CHUNKS - timeSinceLastPlay);
             return;
         }
-        
+
         // Get next audio chunk
         const chunk = audioQueue.shift();
         lastPlayTime = now;
-        
+
         try {
             // Create an audio buffer
             const audioBuffer = audioContext.createBuffer(1, chunk.frameCount, chunk.sampleRate);
-            
+
             // Get the raw audio data and convert from Int16 to Float32 format
             const channelData = audioBuffer.getChannelData(0);
             for (let i = 0; i < chunk.frameCount; i++) {
                 // Convert from Int16 (-32768 to 32767) to Float32 (-1.0 to 1.0) with improved precision
                 channelData[i] = chunk.data[i] / 32768.0;
             }
-            
+
             // Create audio source
             const source = audioContext.createBufferSource();
             source.buffer = audioBuffer;
-            
+
             // Create higher quality audio pipeline
             let outputNode = source;
-            
+
             if (chunk.preserveQuality) {
                 // Create a high-pass filter to remove rumble
                 const highPass = audioContext.createBiquadFilter();
                 highPass.type = "highpass";
                 highPass.frequency.value = 80;    // Cut below 80Hz
-                
+
                 // Create a low-pass filter to remove high-frequency noise
                 const lowPass = audioContext.createBiquadFilter();
                 lowPass.type = "lowpass";
                 lowPass.frequency.value = 12000;  // Cut above 12kHz
-                
+
                 // Add vocal clarity filter - improved for speech intelligibility
                 const clarityEQ = audioContext.createBiquadFilter();
                 clarityEQ.type = "peaking";
                 clarityEQ.frequency.value = 2500; // Focus on speech intelligibility
                 clarityEQ.Q.value = 0.8;          // Wider filter for natural sound
                 clarityEQ.gain.value = 3;         // +3dB boost for clarity
-                
+
                 // Add second vocal presence filter
                 const presenceEQ = audioContext.createBiquadFilter();
                 presenceEQ.type = "peaking";
                 presenceEQ.frequency.value = 5000; // Higher vocal presence
                 presenceEQ.Q.value = 1.2;
                 presenceEQ.gain.value = 2;        // +2dB boost
-                
+
                 // Add bass reduction for clearer speech
                 const bassReduction = audioContext.createBiquadFilter();
                 bassReduction.type = "peaking";
                 bassReduction.frequency.value = 250;
                 bassReduction.Q.value = 1.0;
                 bassReduction.gain.value = -2;    // -2dB cut to reduce muddiness
-                
+
                 // Add compressor with speech-optimized settings
                 const compressor = audioContext.createDynamicsCompressor();
                 compressor.threshold.value = -20;  // Lower threshold for more consistent volume
@@ -609,11 +638,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 compressor.ratio.value = 4;        // Higher ratio for more consistent levels
                 compressor.attack.value = 0.005;   // Fast attack to catch transients
                 compressor.release.value = 0.15;   // Short release for speech
-                
+
                 // Master gain with slight boost
                 const gainNode = audioContext.createGain();
                 gainNode.gain.value = 1.1;        // Slight volume boost
-                
+
                 // Connect through enhanced pipeline for clearest speech
                 source.connect(highPass);
                 highPass.connect(bassReduction);
@@ -624,17 +653,104 @@ document.addEventListener('DOMContentLoaded', function() {
                 compressor.connect(gainNode);
                 outputNode = gainNode;
             }
-            
+
             // Connect to destination
             outputNode.connect(audioContext.destination);
-            
+
             // When playback ends, process next chunk
             source.onended = processAudioQueue;
-            
+
             // Start playing with slight delay to prevent clicks
             source.start(audioContext.currentTime + 0.01);
-            
+
             // Visualize the audio
+
+    /**
+     * Request server to reconnect the AI WebSocket
+     */
+    function requestReconnection() {
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+            logStatus('Cannot reconnect: WebSocket not connected');
+            return false;
+        }
+
+        logStatus('Requesting reconnection to the AI...');
+        socket.send(JSON.stringify({
+            type: 'command',
+            command: 'reconnect'
+        }));
+        
+        return true;
+    }
+    
+    /**
+     * Add a recovery button to the UI for manual reconnection
+     */
+    function addRecoveryButton() {
+        // Check if button already exists
+        if (document.getElementById('recovery-button')) {
+            return;
+        }
+        
+        const controlsContainer = document.querySelector('.controls');
+        if (!controlsContainer) return;
+        
+        const recoveryButton = document.createElement('button');
+        recoveryButton.id = 'recovery-button';
+        recoveryButton.className = 'secondary-button';
+        recoveryButton.textContent = 'Reconnect Audio';
+        recoveryButton.addEventListener('click', function() {
+            // Try to reconnect the audio pipeline
+            logStatus('Manual audio reconnection requested');
+            
+            if (isRunning) {
+                // Try to request server reconnection
+                if (requestReconnection()) {
+                    logStatus('Reconnection request sent');
+                } else {
+                    // If server connection is down, try to restart the audio context
+                    if (audioContext) {
+                        audioContext.close().then(() => {
+                            audioContext = new AudioContext({ sampleRate: sampleRate });
+                            addAudioContextStateListener();
+                            audioContext.resume().then(() => {
+                                logStatus('Audio context restarted');
+                            });
+                        }).catch(err => {
+                            logStatus('Failed to restart audio: ' + err.message);
+                        });
+                    }
+                }
+            } else {
+                logStatus('Cannot reconnect when not running');
+            }
+        });
+        
+        // Insert before the stop button
+        controlsContainer.insertBefore(recoveryButton, stopButton);
+    }
+    
+    /**
+     * Add audio context state listener for debugging
+     */
+    function addAudioContextStateListener() {
+        if (audioContext) {
+            audioContext.onstatechange = function() {
+                console.log('Audio context state changed to:', audioContext.state);
+                logStatus(`Audio state: ${audioContext.state}`);
+                
+                // If it becomes suspended, try to resume it automatically
+                if (audioContext.state === 'suspended' && isRunning) {
+                    audioContext.resume().then(() => {
+                        logStatus('Audio context resumed automatically');
+                    }).catch(err => {
+                        logStatus('Failed to auto-resume: ' + err.message);
+                    });
+                }
+            };
+        }
+    }
+
             if (audioVisualizerInstance) {
                 const visualData = new Float32Array(chunk.frameCount);
                 for (let i = 0; i < chunk.frameCount; i++) {
@@ -642,7 +758,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
                 audioVisualizerInstance.updateOutputData(visualData);
             }
-            
+
         } catch (error) {
             console.error('Error playing audio chunk:', error);
             // Continue with queue even if one chunk fails
@@ -675,7 +791,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const timeoutPromise = new Promise((_, reject) => {
                 setTimeout(() => reject(new Error('Timeout getting microphone stream')), 10000);
             });
-            
+
             mediaStream = await Promise.race([streamPromise, timeoutPromise]);
 
             // Create audio source
@@ -693,6 +809,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
             // Set up audio processing
             audioProcessor.onaudioprocess = processAudio;
+            
+            // Add audio context state listener
+            addAudioContextStateListener();
 
             logStatus('Microphone connected with enhanced quality settings');
 
