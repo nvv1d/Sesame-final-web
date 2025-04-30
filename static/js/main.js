@@ -46,6 +46,9 @@ document.addEventListener('DOMContentLoaded', function() {
     let isRunning = false;
     let isConnected = false;
 
+    // Ping interval for keeping connection alive
+    let pingInterval = null;
+
     // Initialize
     updateStatus('Disconnected');
     updateConnectionStatus('Disconnected');
@@ -56,53 +59,7 @@ document.addEventListener('DOMContentLoaded', function() {
     stopButton.addEventListener('click', stopVoiceChat);
     characterSelect.addEventListener('change', updateCharacterDisplay);
 
-    // Add recovery button function definition 
-    function addRecoveryButton() {
-        // Check if button already exists
-        if (document.getElementById('recovery-button')) {
-            return;
-        }
-
-        const controlsContainer = document.querySelector('.controls');
-        if (!controlsContainer) return;
-
-        const recoveryButton = document.createElement('button');
-        recoveryButton.id = 'recovery-button';
-        recoveryButton.className = 'secondary-button';
-        recoveryButton.textContent = 'Reconnect Audio';
-        recoveryButton.addEventListener('click', function() {
-            // Try to reconnect the audio pipeline
-            logStatus('Manual audio reconnection requested');
-
-            if (isRunning) {
-                // Try to request server reconnection
-                if (requestReconnection()) {
-                    logStatus('Reconnection request sent');
-                } else {
-                    // If server connection is down, try to restart the audio context
-                    if (audioContext) {
-                        audioContext.close().then(() => {
-                            audioContext = new AudioContext({ sampleRate: sampleRate });
-                            addAudioContextStateListener();
-                            audioContext.resume().then(() => {
-                                logStatus('Audio context restarted');
-                            });
-                        }).catch(err => {
-                            logStatus('Failed to restart audio: ' + err.message);
-                        });
-                    }
-                }
-            } else {
-                logStatus('Cannot reconnect when not running');
-            }
-        });
-
-        // Insert before the stop button
-        controlsContainer.insertBefore(recoveryButton, stopButton);
-    }
-    
-    // Add recovery button
-    addRecoveryButton();
+    // Recovery functionality removed as requested
 
     // Add audio context resume function to handle suspended state
     function ensureAudioContextRunning() {
@@ -130,71 +87,31 @@ document.addEventListener('DOMContentLoaded', function() {
     updateCharacterDisplay();
 
     /**
-     * Add a recovery button to the UI for manual reconnection
+     * Recovery button functionality removed as requested
      */
-    function addRecoveryButton() {
-        // Check if button already exists
-        if (document.getElementById('recovery-button')) {
-            return;
-        }
-
-        const controlsContainer = document.querySelector('.controls');
-        if (!controlsContainer) return;
-
-        const recoveryButton = document.createElement('button');
-        recoveryButton.id = 'recovery-button';
-        recoveryButton.className = 'secondary-button';
-        recoveryButton.textContent = 'Reconnect Audio';
-        recoveryButton.addEventListener('click', function() {
-            // Try to reconnect the audio pipeline
-            logStatus('Manual audio reconnection requested');
-
-            if (isRunning) {
-                // Try to request server reconnection
-                if (requestReconnection()) {
-                    logStatus('Reconnection request sent');
-                } else {
-                    // If server connection is down, try to restart the audio context
-                    if (audioContext) {
-                        audioContext.close().then(() => {
-                            audioContext = new AudioContext({ sampleRate: sampleRate });
-                            addAudioContextStateListener();
-                            audioContext.resume().then(() => {
-                                logStatus('Audio context restarted');
-                            });
-                        }).catch(err => {
-                            logStatus('Failed to restart audio: ' + err.message);
-                        });
-                    }
-                }
-            } else {
-                logStatus('Cannot reconnect when not running');
-            }
-        });
-
-        // Insert before the stop button
-        controlsContainer.insertBefore(recoveryButton, stopButton);
-    }
 
     /**
      * Add audio context state listener for debugging
      */
     function addAudioContextStateListener() {
         if (audioContext) {
-            audioContext.onstatechange = function(event) {
+            // Store reference to avoid closure issues if audioContext is reassigned
+            const context = audioContext;
+
+            context.onstatechange = function(event) {
                 try {
-                    // Check if audioContext is still valid when this event fires
-                    if (!audioContext) {
-                        console.log('Audio context was null during state change event');
+                    // Safe check for context existence
+                    if (!context || context.state === undefined) {
+                        console.log('Audio context is invalid during state change event');
                         return;
                     }
-                    
-                    console.log('Audio context state changed to:', audioContext.state);
-                    logStatus(`Audio state: ${audioContext.state}`);
+
+                    console.log('Audio context state changed to:', context.state);
+                    logStatus(`Audio state: ${context.state}`);
 
                     // If it becomes suspended, try to resume it automatically
-                    if (audioContext && audioContext.state === 'suspended' && isRunning) {
-                        audioContext.resume().then(() => {
+                    if (context.state === 'suspended' && isRunning) {
+                        context.resume().then(() => {
                             logStatus('Audio context resumed automatically');
                         }).catch(err => {
                             logStatus('Failed to auto-resume: ' + err.message);
@@ -429,6 +346,9 @@ document.addEventListener('DOMContentLoaded', function() {
             updateStatus('Connected');
             updateConnectionStatus('Connected');
 
+            // Start sending ping messages to keep the connection alive
+            startPingInterval();
+
         } catch (error) {
             console.error('Error starting voice chat:', error);
             logStatus(`Error: ${error.message}`);
@@ -512,6 +432,10 @@ document.addEventListener('DOMContentLoaded', function() {
             if (audioVisualizerInstance) {
                 audioVisualizerInstance.stop();
             }
+
+            // Clear ping interval
+            clearInterval(pingInterval);
+            pingInterval = null;
 
         } catch (error) {
             console.error('Error stopping voice chat:', error);
@@ -631,7 +555,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     } catch (err) {
                         console.error('Reconnection failed:', err);
                         logStatus('Failed to reconnect: ' + err.message);
-                        
+
                         // If still running, try again after a longer delay
                         if (isRunning) {
                             setTimeout(function() {
@@ -658,11 +582,62 @@ document.addEventListener('DOMContentLoaded', function() {
      * Handle WebSocket error event
      */
     function handleSocketError(error) {
-        console.error('WebSocket error:', error);
-        logStatus('WebSocket error detected - this may cause audio interruptions');
-        
-        // Don't immediately close socket here - let the close handler deal with reconnection
-        // if the error leads to a close event
+        console.log('WebSocket error:', error);
+        logStatus('WebSocket error detected - attempting recovery');
+
+        try {
+            // Check if socket is still open despite the error
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                // Try to send a ping to verify connection
+                try {
+                    socket.send(JSON.stringify({ type: 'ping' }));
+                    logStatus('Connection still active after error');
+                } catch (err) {
+                    logStatus('Connection broken, will attempt reconnect on close');
+                    // Force close to trigger reconnection flow
+                    try {
+                        socket.close(1000, "Manual close after error");
+                    } catch (closeErr) {
+                        console.log('Error during manual close:', closeErr);
+                    }
+                }
+            } else if (socket && socket.readyState === WebSocket.CONNECTING) {
+                // Still connecting - wait for either open or close event
+                logStatus('Connection attempt in progress');
+                // Add a timeout to force reconnection if connecting takes too long
+                setTimeout(() => {
+                    if (socket && socket.readyState === WebSocket.CONNECTING) {
+                        try {
+                            socket.close(1000, "Connection timeout");
+                            // Attempt to reconnect
+                            if (isRunning && sessionId) {
+                                connectWebSocket();
+                            }
+                        } catch (err) {
+                            console.log('Error during timeout close:', err);
+                        }
+                    }
+                }, 5000); // 5 second timeout for connecting state
+            } else {
+                // Already closing/closed - reconnection will happen via close handler
+                logStatus('Connection closing/closed');
+                // Clean up the socket reference to allow garbage collection
+                if (socket) {
+                    socket = null;
+                }
+                // Force reconnection if we're still running
+                if (isRunning && sessionId) {
+                    setTimeout(connectWebSocket, 2000);
+                }
+            }
+        } catch (handlerErr) {
+            console.error('Error in WebSocket error handler:', handlerErr);
+            // Last-resort recovery
+            socket = null;
+            if (isRunning && sessionId) {
+                setTimeout(connectWebSocket, 3000);
+            }
+        }
     }
 
     /**
@@ -836,7 +811,7 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!audioContext) {
             console.warn('Audio context not available');
             isPlayingFromQueue = false;
-            
+
             // If we're still supposed to be running, try to recreate audio context
             if (isRunning) {
                 try {
@@ -852,7 +827,7 @@ document.addEventListener('DOMContentLoaded', function() {
             }
             return;
         }
-        
+
         if (audioContext.state !== 'running') {
             console.warn('Audio context suspended');
             // Try to resume if suspended
@@ -881,7 +856,7 @@ document.addEventListener('DOMContentLoaded', function() {
             setTimeout(processAudioQueue, AUDIO_SETTINGS.minGapBetweenChunks - timeSinceLastPlay);
             return;
         }
-        
+
         // Limit queue size to prevent memory issues
         if (audioQueue.length > AUDIO_SETTINGS.maxQueueSize) {
             // Keep only the most recent chunks if queue gets too large
@@ -1134,19 +1109,20 @@ document.addEventListener('DOMContentLoaded', function() {
     /**
      * Start sending ping messages
      */
-    let pingInterval = null;
     function startPingInterval() {
         // Clear any existing interval
         if (pingInterval) {
             clearInterval(pingInterval);
         }
 
+        let pingIntervalTime = 30000;  // 30 seconds
+        
         // Send ping every 30 seconds
         pingInterval = setInterval(() => {
             if (socket && socket.readyState === WebSocket.OPEN) {
                 socket.send(JSON.stringify({ type: 'ping' }));
             }
-        }, 30000);
+        }, pingIntervalTime);
     }
 
     /**
