@@ -975,3 +975,48 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 });
+
+/**
+ * Request server to reconnect the AI WebSocket
+ */
+function requestReconnection() {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+        logStatus('Cannot reconnect: WebSocket not connected');
+        return false;
+    }
+
+    logStatus('Requesting reconnection to the AI...');
+    socket.send(JSON.stringify({
+        type: 'command',
+        command: 'reconnect'
+    }));
+    
+    return true;
+}
+
+/**
+ * Handle socket close event with reconnection logic
+ */
+function handleSocketClose(event) {
+    console.log('WebSocket closed:', event);
+    isConnected = false;
+    logStatus(`WebSocket closed: ${event.reason || 'Connection closed'}`);
+    
+    updateConnectionStatus('Disconnected');
+    
+    // If it's an abnormal closure and we're still running, try to reconnect the browser WebSocket
+    if (event.code !== 1000 && isRunning) {
+        logStatus('Attempting to reconnect browser WebSocket...');
+        setTimeout(function() {
+            if (isRunning && sessionId) {
+                connectWebSocket();
+            }
+        }, 2000); // Wait 2 seconds before reconnecting
+    } else if (!isRunning) {
+        logStatus('Session stopped');
+    }
+}
+
+// Make sure to update your socket event handler to use the new close handler
+// Add this to your connectWebSocket function:
+// socket.onclose = handleSocketClose;
