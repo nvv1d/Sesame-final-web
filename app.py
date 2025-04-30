@@ -48,10 +48,14 @@ class VoiceChatProxy:
         self.character = character
         self.token_file = token_file
 
-        # Audio settings
+        # Audio settings - improved for better clarity
         self.client_sample_rate = 16000  # Expected from browser
         self.server_sample_rate = 24000  # Will be updated from Sesame AI server
-        self.audio_segment_duration = 0.03  # 30ms segments for better responsiveness
+        self.audio_segment_duration = 0.02  # Reduced from 0.03 to 0.02 for better responsiveness
+        
+        # Add a buffer for smoothing audio
+        self.audio_buffer = []
+        self.max_buffer_length = 5  # Maximum number of chunks to buffer
 
         # SesameAI client
         self.api_client = SesameAI()
@@ -163,37 +167,77 @@ class VoiceChatProxy:
 
         while self.running:
             try:
-                # Get audio chunk from WebSocket buffer with a short timeout
+                # Get audio chunk from WebSocket buffer with a shorter timeout
                 if self.ws:
-                    audio_chunk = self.ws.get_next_audio_chunk(timeout=0.1)
+                    audio_chunk = self.ws.get_next_audio_chunk(timeout=0.05)  # Shorter timeout
                     if audio_chunk and self.browser_ws and self.client_connected:
-                        # Convert to base64 for sending to browser - preserve full quality
-                        audio_base64 = base64.b64encode(audio_chunk).decode('utf-8')
+                        # Add minimal buffering to reduce stutter without adding much latency
+                        self.audio_buffer.append(audio_chunk)
+                        
+                        # Process the buffer when it reaches a certain size or after a timeout
+                        if len(self.audio_buffer) >= 2:  # Process after collecting 2 chunks
+                            # Combine audio chunks for smoother playback
+                            combined_chunk = b''.join(self.audio_buffer)
+                            self.audio_buffer = []  # Clear buffer
+                            
+                            # Convert to base64 for sending to browser
+                            audio_base64 = base64.b64encode(combined_chunk).decode('utf-8')
 
-                        # Apply optional audio enhancement before sending
-                        # Just pass through as is, client will handle enhanced processing
+                            # Create message with enhanced audio metadata
+                            message = {
+                                'type': 'audio',
+                                'data': audio_base64,
+                                'sampleRate': self.server_sample_rate,
+                                'preserveQuality': True,
+                                'format': 'int16',
+                                'channels': 1,
+                                'bitDepth': 16,
+                                'priority': 'high'  # Add priority hint for browser
+                            }
 
-                        # Create message with audio data and ensure high sample rate
-                        message = {
-                            'type': 'audio',
-                            'data': audio_base64,
-                            'sampleRate': self.server_sample_rate,
-                            'preserveQuality': True,
-                            'format': 'int16',
-                            'channels': 1,
-                            'bitDepth': 16
-                        }
-
-                        # Send to browser
-                        try:
-                            self.browser_ws.send(json.dumps(message))
-                        except Exception as e:
-                            logger.error(f"Error sending audio to browser: {e}")
+                            # Send to browser with try-except for better error handling
+                            try:
+                                self.browser_ws.send(json.dumps(message))
+                            except Exception as e:
+                                logger.error(f"Error sending audio to browser: {e}")
+                                # Reset buffer on error
+                                self.audio_buffer = []
+                    else:
+                        # Periodically process any buffered audio to prevent delay buildup
+                        if self.audio_buffer and len(self.audio_buffer) > 0 and self.browser_ws and self.client_connected:
+                            combined_chunk = b''.join(self.audio_buffer)
+                            self.audio_buffer = []
+                            
+                            audio_base64 = base64.b64encode(combined_chunk).decode('utf-8')
+                            message = {
+                                'type': 'audio',
+                                'data': audio_base64,
+                                'sampleRate': self.server_sample_rate,
+                                'preserveQuality': True,
+                                'format': 'int16', 
+                                'channels': 1,
+                                'bitDepth': 16
+                            }
+                            
+                            try:
+                                self.browser_ws.send(json.dumps(message))
+                            except Exception as e:
+                                logger.error(f"Error sending buffered audio: {e}")
+                        
+                        # Short sleep to prevent CPU hogging
+                        time.sleep(0.01)
                 else:
-                    time.sleep(0.1)
+                    time.sleep(0.05)
+                    
+                # Prevent buffer from growing too large during silence
+                if len(self.audio_buffer) > self.max_buffer_length:
+                    self.audio_buffer = self.audio_buffer[-self.max_buffer_length:]
+                    
             except Exception as e:
                 if self.running:
                     logger.error(f"Error processing audio: {e}", exc_info=True)
+                    # Reset buffer on error to avoid accumulating bad data
+                    self.audio_buffer = []
 
     def send_audio_to_ai(self, audio_data_base64):
         """Send audio data from browser to Sesame AI"""
