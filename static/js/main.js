@@ -21,6 +21,12 @@ document.addEventListener('DOMContentLoaded', function() {
     let audioInput = null;
     let audioProcessor = null;
     let audioAnalyser = null;
+
+let audioQueue = [];
+let isPlayingFromQueue = false;
+let lastPlayTime = 0;
+const MIN_GAP_BETWEEN_CHUNKS = 50; // milliseconds
+
     let audioVisualizerInstance = null;
 
     // Voice activity detection settings
@@ -462,19 +468,68 @@ document.addEventListener('click', ensureAudioContextRunning);
             // Decode base64 audio data
             const byteArray = base64ToArrayBuffer(audioData);
             
-            // Convert byteArray to Int16Array (16-bit PCM format that Sesame AI uses)
+            // Convert byteArray to Int16Array (16-bit PCM format)
             const int16Data = new Int16Array(byteArray);
             
-            // Use a higher sample rate when available
+            // Use provided sample rate or default to high quality
             const effectiveSampleRate = sampleRate || 24000;
             const frameCount = int16Data.length;
-            const audioBuffer = audioContext.createBuffer(1, frameCount, effectiveSampleRate);
             
-            // Get the raw audio data and convert from Int16 to Float32 format with enhanced precision
+            // Calculate duration of this audio chunk
+            const durationMs = (frameCount / effectiveSampleRate) * 1000;
+            
+            // Create audio processing object
+            const audioChunk = {
+                data: int16Data,
+                sampleRate: effectiveSampleRate,
+                frameCount: frameCount,
+                duration: durationMs,
+                preserveQuality: preserveQuality
+            };
+            
+            // Add to queue for sequential playback
+            audioQueue.push(audioChunk);
+            
+            // Start playing if not already
+            if (!isPlayingFromQueue) {
+                processAudioQueue();
+            }
+            
+        } catch (error) {
+            console.error('Error queuing audio:', error);
+        }
+    }
+
+    function processAudioQueue() {
+        if (audioQueue.length === 0) {
+            isPlayingFromQueue = false;
+            return;
+        }
+        
+        isPlayingFromQueue = true;
+        const now = Date.now();
+        
+        // Respect minimum gap between audio chunks
+        const timeSinceLastPlay = now - lastPlayTime;
+        if (timeSinceLastPlay < MIN_GAP_BETWEEN_CHUNKS && lastPlayTime !== 0) {
+            // Wait before playing next chunk
+            setTimeout(processAudioQueue, MIN_GAP_BETWEEN_CHUNKS - timeSinceLastPlay);
+            return;
+        }
+        
+        // Get next audio chunk
+        const chunk = audioQueue.shift();
+        lastPlayTime = now;
+        
+        try {
+            // Create an audio buffer
+            const audioBuffer = audioContext.createBuffer(1, chunk.frameCount, chunk.sampleRate);
+            
+            // Get the raw audio data and convert from Int16 to Float32 format
             const channelData = audioBuffer.getChannelData(0);
-            for (let i = 0; i < frameCount; i++) {
-                // Convert from Int16 (-32768 to 32767) to Float32 (-1.0 to 1.0)
-                channelData[i] = (int16Data[i] / 32768.0);
+            for (let i = 0; i < chunk.frameCount; i++) {
+                // Convert from Int16 (-32768 to 32767) to Float32 (-1.0 to 1.0) with improved precision
+                channelData[i] = chunk.data[i] / 32768.0;
             }
             
             // Create audio source
@@ -484,10 +539,85 @@ document.addEventListener('click', ensureAudioContextRunning);
             // Create higher quality audio pipeline
             let outputNode = source;
             
-            if (preserveQuality) {
-                // Add high-quality context with enhanced voice settings
+            if (chunk.preserveQuality) {
+                // Create a high-pass filter to remove rumble
+                const highPass = audioContext.createBiquadFilter();
+                highPass.type = "highpass";
+                highPass.frequency.value = 80;    // Cut below 80Hz
+                
+                // Create a low-pass filter to remove high-frequency noise
+                const lowPass = audioContext.createBiquadFilter();
+                lowPass.type = "lowpass";
+                lowPass.frequency.value = 12000;  // Cut above 12kHz
+                
+                // Add vocal clarity filter - improved for speech intelligibility
+                const clarityEQ = audioContext.createBiquadFilter();
+                clarityEQ.type = "peaking";
+                clarityEQ.frequency.value = 2500; // Focus on speech intelligibility
+                clarityEQ.Q.value = 0.8;          // Wider filter for natural sound
+                clarityEQ.gain.value = 3;         // +3dB boost for clarity
+                
+                // Add second vocal presence filter
+                const presenceEQ = audioContext.createBiquadFilter();
+                presenceEQ.type = "peaking";
+                presenceEQ.frequency.value = 5000; // Higher vocal presence
+                presenceEQ.Q.value = 1.2;
+                presenceEQ.gain.value = 2;        // +2dB boost
+                
+                // Add bass reduction for clearer speech
+                const bassReduction = audioContext.createBiquadFilter();
+                bassReduction.type = "peaking";
+                bassReduction.frequency.value = 250;
+                bassReduction.Q.value = 1.0;
+                bassReduction.gain.value = -2;    // -2dB cut to reduce muddiness
+                
+                // Add compressor with speech-optimized settings
                 const compressor = audioContext.createDynamicsCompressor();
-                // Dynamic compression settings optimized for voice clarity
+                compressor.threshold.value = -20;  // Lower threshold for more consistent volume
+                compressor.knee.value = 6;         // Gentler knee for more natural compression
+                compressor.ratio.value = 4;        // Higher ratio for more consistent levels
+                compressor.attack.value = 0.005;   // Fast attack to catch transients
+                compressor.release.value = 0.15;   // Short release for speech
+                
+                // Master gain with slight boost
+                const gainNode = audioContext.createGain();
+                gainNode.gain.value = 1.1;        // Slight volume boost
+                
+                // Connect through enhanced pipeline for clearest speech
+                source.connect(highPass);
+                highPass.connect(bassReduction);
+                bassReduction.connect(clarityEQ);
+                clarityEQ.connect(presenceEQ);
+                presenceEQ.connect(lowPass);
+                lowPass.connect(compressor);
+                compressor.connect(gainNode);
+                outputNode = gainNode;
+            }
+            
+            // Connect to destination
+            outputNode.connect(audioContext.destination);
+            
+            // When playback ends, process next chunk
+            source.onended = processAudioQueue;
+            
+            // Start playing with slight delay to prevent clicks
+            source.start(audioContext.currentTime + 0.01);
+            
+            // Visualize the audio
+            if (audioVisualizerInstance) {
+                const visualData = new Float32Array(chunk.frameCount);
+                for (let i = 0; i < chunk.frameCount; i++) {
+                    visualData[i] = chunk.data[i] / 32768.0;
+                }
+                audioVisualizerInstance.updateOutputData(visualData);
+            }
+            
+        } catch (error) {
+            console.error('Error playing audio chunk:', error);
+            // Continue with queue even if one chunk fails
+            processAudioQueue();
+        }
+    }
                 compressor.threshold.value = -24;  // More aggressive compression for clarity
                 compressor.knee.value = 18;        // Sharper knee for better articulation
                 compressor.ratio.value = 3;        // Moderate ratio for natural sound
